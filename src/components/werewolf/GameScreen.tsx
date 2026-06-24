@@ -9,6 +9,10 @@ import { InfoPanel } from './InfoPanel'
 import { VoiceInput } from './VoiceInput'
 import { SeerResultDialog } from './SeerResultDialog'
 import { ToastTip } from './ToastTip'
+import { ConfirmDialog } from './ConfirmDialog'
+import { BeginnerGuide } from './BeginnerGuide'
+import { RuleSheet } from './RuleSheet'
+import { TypewriterText } from './TypewriterText'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Textarea } from '@/components/ui/textarea'
@@ -18,6 +22,7 @@ import { useMemo, useState, useEffect, useRef } from 'react'
 import {
   Moon, Sun, Skull, ScrollText, Send, SkipForward, Check, X,
   Shield, Crosshair, Eye, FlaskConical, Target, Loader2, ChevronUp, Bomb, Crown, History, Bell,
+  Gauge, Snail, Zap, BookOpen,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
@@ -70,6 +75,128 @@ function VoteCountdown({ deadline }: { deadline: number | null }) {
   )
 }
 
+// 票型墙可视化组件（竞品分析 §3.4）
+// 每个被投玩家一列，下方聚集投票者头像，得票最多者高亮
+function VoteWall({
+  votes,
+  players,
+  sheriffId,
+  title,
+  revealed,
+  pkPair,
+}: {
+  votes: { voterId: number; voterName: string; targetId: number | null; targetName: string | null }[]
+  players: Player[]
+  sheriffId: number | null
+  title: string
+  revealed: boolean  // 是否公布最终结果（高亮最高票）
+  pkPair?: number[]  // PK 模式下仅展示 PK 候选
+}) {
+  // 按被投目标分组
+  const grouped = new Map<number | null, typeof votes>()
+  for (const v of votes) {
+    const key = v.targetId
+    if (!grouped.has(key)) grouped.set(key, [])
+    grouped.get(key)!.push(v)
+  }
+  // 取得所有目标（按得票数降序），弃票单独放最后
+  const targets = [...grouped.entries()]
+    .filter(([tid]) => tid !== null)
+    .map(([tid, vs]) => ({
+      targetId: tid as number,
+      votes: vs,
+      count: vs.length + vs.filter((v) => v.voterId === sheriffId).length * 0.5, // 警长1.5票
+    }))
+    .sort((a, b) => b.count - a.count)
+  // PK 模式仅展示 pkPair
+  const filteredTargets = pkPair ? targets.filter((t) => pkPair.includes(t.targetId)) : targets
+  const abstainVotes = grouped.get(null) || []
+  const maxCount = filteredTargets.length > 0 ? filteredTargets[0].count : 0
+  const totalVoters = players.filter((p) => p.isAlive).length
+
+  return (
+    <div className="mt-2 glass-card rounded-2xl p-2.5">
+      <div className="text-xs text-amber-200/70 px-0.5 pb-2 flex items-center justify-between">
+        <span className="flex items-center gap-1">
+          <Target className="w-3 h-3" /> {title}
+        </span>
+        <span className="text-[10px] text-amber-100/40">{votes.length}/{totalVoters} 已投</span>
+      </div>
+      <div className="flex gap-2 overflow-x-auto scrollbar-thin pb-1">
+        {filteredTargets.map(({ targetId, votes: vs, count }) => {
+          const target = players.find((p) => p.id === targetId)
+          const isMax = revealed && count === maxCount && filteredTargets.filter((t) => t.count === maxCount).length === 1
+          return (
+            <motion.div
+              key={targetId}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className={cn(
+                'flex flex-col items-center min-w-[64px] rounded-xl p-1.5 transition-all',
+                isMax ? 'bg-rose-500/20 ring-1 ring-rose-400/50' : 'bg-amber-200/5',
+              )}
+            >
+              <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-slate-600/60 to-slate-800/60 flex items-center justify-center text-lg mb-1">
+                {target?.avatar || '🙂'}
+              </div>
+              <div className="text-[10px] text-amber-100/70 mb-0.5">{targetId}号</div>
+              <div className={cn('text-xs font-bold tabular-nums mb-1', isMax ? 'text-rose-300' : 'text-amber-200')}>
+                {count % 1 === 0 ? count : count.toFixed(1)}票
+              </div>
+              <div className="flex flex-wrap gap-0.5 justify-center max-w-[60px]">
+                {vs.map((v, i) => {
+                  const voter = players.find((p) => p.id === v.voterId)
+                  const isSheriff = v.voterId === sheriffId
+                  return (
+                    <motion.div
+                      key={i}
+                      initial={{ scale: 0 }}
+                      animate={{ scale: 1 }}
+                      transition={{ delay: i * 0.05 }}
+                      className={cn(
+                        'w-5 h-5 rounded-full flex items-center justify-center text-[10px] relative',
+                        isSheriff ? 'bg-violet-500/40 ring-1 ring-violet-400' : 'bg-amber-400/20',
+                      )}
+                      title={`${v.voterName}(${v.voterId}号)${isSheriff ? ' · 警长1.5票' : ''}`}
+                    >
+                      {voter?.avatar || '🙂'}
+                    </motion.div>
+                  )
+                })}
+              </div>
+            </motion.div>
+          )
+        })}
+        {/* 弃票 */}
+        {abstainVotes.length > 0 && (
+          <div className="flex flex-col items-center min-w-[64px] rounded-xl p-1.5 bg-amber-200/5">
+            <div className="w-9 h-9 rounded-lg bg-slate-700/40 flex items-center justify-center text-lg mb-1">
+              🚫
+            </div>
+            <div className="text-[10px] text-amber-100/70 mb-0.5">弃票</div>
+            <div className="text-xs font-bold text-amber-200/60 mb-1">{abstainVotes.length}票</div>
+            <div className="flex flex-wrap gap-0.5 justify-center max-w-[60px]">
+              {abstainVotes.map((v, i) => {
+                const voter = players.find((p) => p.id === v.voterId)
+                return (
+                  <div key={i} className="w-5 h-5 rounded-full bg-amber-400/20 flex items-center justify-center text-[10px]" title={`${v.voterName} 弃票`}>
+                    {voter?.avatar || '🙂'}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+      {revealed && filteredTargets.length > 0 && filteredTargets.filter((t) => t.count === maxCount).length === 1 && (
+        <div className="mt-1.5 text-center text-[11px] text-rose-300">
+          🎯 {filteredTargets[0].targetId}号 得票最高，将被放逐
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function GameScreen() {
   const state = useWerewolfStore()
   const {
@@ -77,6 +204,7 @@ export function GameScreen() {
     speeches, speechHistory, events, votes, currentSpeaker, processing, speaking, winner,
     witchAntidoteUsed, witchPoisonUsed, lastGuardTarget, voteDeadline,
     whiteWolfSkillAvailable,
+    speechSpeed, pkPair, pkRound, voteRevealed, speakCount, speakTotal,
   } = state
 
   const user = players.find((p) => p.id === userPlayerId)
@@ -171,6 +299,10 @@ export function GameScreen() {
       return alive.filter((p) => p.id !== user.id)
     }
     if (userAction === 'vote') {
+      // PK 模式：只能投 pkPair 中的玩家
+      if (pkPair && pkRound > 0) {
+        return alive.filter((p) => pkPair.includes(p.id) && p.id !== user.id)
+      }
       return alive.filter((p) => p.id !== user.id)
     }
     if (userAction === 'sheriff-vote') {
@@ -186,7 +318,7 @@ export function GameScreen() {
       return alive
     }
     return []
-  }, [userAction, players, user, lastGuardTarget, state.sheriffCandidates])
+  }, [userAction, players, user, lastGuardTarget, state.sheriffCandidates, pkPair, pkRound])
 
   const canConfirm = useMemo(() => {
     if (userAction === 'guard' || userAction === 'wolf' || userAction === 'seer' || userAction === 'vote' || userAction === 'hunter' || userAction === 'sheriff-vote' || userAction === 'self-destruct') {
@@ -242,18 +374,62 @@ export function GameScreen() {
     } else if (userAction === 'seer') {
       if (selectedTarget !== null) state.userNightAction({ seerTarget: selectedTarget })
     } else if (userAction === 'witch') {
-      state.userNightAction({
-        witchSave: witchSave === true,
-        witchPoisonTarget: witchPoison ?? undefined,
-      })
+      // 高风险：女巫使用毒药需二次确认
+      if (witchPoison !== null) {
+        const target = players.find((p) => p.id === witchPoison)
+        state.showConfirmDialog({
+          title: '确认使用毒药？',
+          desc: `该操作不可撤销！将毒杀 ${witchPoison}号 ${target?.name || ''}，立即结算夜晚。`,
+          confirmText: '确认毒杀',
+          cancelText: '取消',
+          danger: true,
+          onConfirm: () => {
+            state.userNightAction({
+              witchSave: witchSave === true,
+              witchPoisonTarget: witchPoison ?? undefined,
+            })
+          },
+        })
+      } else {
+        state.userNightAction({
+          witchSave: witchSave === true,
+          witchPoisonTarget: undefined,
+        })
+      }
     } else if (userAction === 'vote' || userAction === 'sheriff-vote') {
       state.userVote(selectedTarget)
     } else if (userAction === 'hunter') {
-      state.userHunterShoot(selectedTarget)
-    } else if (userAction === 'self-destruct') {
+      // 高风险：猎人开枪需二次确认
       if (selectedTarget !== null) {
-        state.userSelfDestruct(selectedTarget)
-        setSelfDestructMode(false)
+        const target = players.find((p) => p.id === selectedTarget)
+        state.showConfirmDialog({
+          title: '确认开枪？',
+          desc: `该操作不可撤销！将带走 ${selectedTarget}号 ${target?.name || ''}，被带走的玩家无遗言。`,
+          confirmText: '确认开枪',
+          cancelText: '取消',
+          danger: true,
+          onConfirm: () => {
+            state.userHunterShoot(selectedTarget)
+          },
+        })
+      } else {
+        state.userHunterShoot(null)
+      }
+    } else if (userAction === 'self-destruct') {
+      // 高风险：白狼王自爆需二次确认
+      if (selectedTarget !== null) {
+        const target = players.find((p) => p.id === selectedTarget)
+        state.showConfirmDialog({
+          title: '确认自爆？',
+          desc: `该操作不可撤销！你将自爆带走 ${selectedTarget}号 ${target?.name || ''}，立即进入黑夜。`,
+          confirmText: '确认自爆',
+          cancelText: '取消',
+          danger: true,
+          onConfirm: () => {
+            state.userSelfDestruct(selectedTarget)
+            setSelfDestructMode(false)
+          },
+        })
       }
     } else if (userAction === 'sheriff-transfer') {
       state.userSheriffTransfer(selectedTarget)
@@ -287,6 +463,10 @@ export function GameScreen() {
       <SeerResultDialog />
       {/* Toast 提示 */}
       <ToastTip />
+      {/* 高风险操作二次确认弹窗 */}
+      <ConfirmDialog />
+      {/* 新手引导气泡 */}
+      <BeginnerGuide />
       {/* 背景图 */}
       <div
         className={cn(
@@ -413,23 +593,83 @@ export function GameScreen() {
                 </div>
               </SheetContent>
             </Sheet>
+
+            {/* 规则按钮（常驻，点击展开当前阶段规则） */}
+            <RuleSheet />
           </div>
 
-          {/* 阶段描述条 */}
-          <div className="mt-2 flex items-center justify-center gap-2 px-3 py-1.5 rounded-full glass-card">
-            {processing && <Loader2 className="w-3 h-3 animate-spin text-amber-300" />}
-            <span className="text-xs text-amber-100/80">{phaseInfo.desc}</span>
-            {aiStatusText && (
-              <motion.span
-                initial={{ opacity: 0, x: -4 }}
-                animate={{ opacity: 1, x: 0 }}
-                className="text-xs text-violet-300 flex items-center gap-1"
-              >
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
-                {aiStatusText}
-              </motion.span>
+          {/* 阶段描述条 + 速度控制 */}
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <div className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 rounded-full glass-card">
+              {processing && <Loader2 className="w-3 h-3 animate-spin text-amber-300" />}
+              <span className="text-xs text-amber-100/80">{phaseInfo.desc}</span>
+              {aiStatusText && (
+                <motion.span
+                  initial={{ opacity: 0, x: -4 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="text-xs text-violet-300 flex items-center gap-1 truncate"
+                >
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse shrink-0" />
+                  <span className="truncate">{aiStatusText}</span>
+                </motion.span>
+              )}
+            </div>
+            {/* 发言速度控制（仅白天讨论/竞选/遗言阶段显示） */}
+            {(phase === 'day-discuss' || phase === 'day-sheriff-campaign' || phase === 'day-lastwords' || phase === 'day-vote') && (
+              <div className="flex items-center gap-0.5 px-1 py-1 rounded-full glass-card">
+                {([
+                  { key: 'slow', icon: Snail, label: '慢' },
+                  { key: 'normal', icon: Gauge, label: '常' },
+                  { key: 'fast', icon: Zap, label: '快' },
+                ] as const).map(({ key, icon: Icon, label }) => (
+                  <button
+                    key={key}
+                    onClick={() => state.setSpeechSpeed(key)}
+                    title={`发言速度：${label}`}
+                    className={cn(
+                      'w-6 h-6 rounded-full flex items-center justify-center transition-colors',
+                      speechSpeed === key
+                        ? 'bg-amber-400/30 text-amber-200'
+                        : 'text-amber-100/40 hover:text-amber-100/70 hover:bg-amber-200/10',
+                    )}
+                  >
+                    <Icon className="w-3 h-3" />
+                  </button>
+                ))}
+              </div>
             )}
           </div>
+
+          {/* 发言进度条（白天讨论阶段） */}
+          {phase === 'day-discuss' && speakTotal > 0 && (
+            <div className="mt-1.5 flex items-center gap-2 px-1">
+              <div className="flex-1 h-1.5 rounded-full bg-amber-200/10 overflow-hidden">
+                <motion.div
+                  className="h-full bg-gradient-to-r from-amber-400 to-orange-500 rounded-full"
+                  initial={{ width: 0 }}
+                  animate={{ width: `${Math.min(100, (speakCount / speakTotal) * 100)}%` }}
+                  transition={{ duration: 0.3 }}
+                />
+              </div>
+              <span className="text-[10px] text-amber-100/60 tabular-nums shrink-0">
+                {pkPair && pkRound > 0 ? `PK ${speakCount}/${speakTotal}` : `${speakCount}/${speakTotal}`}
+              </span>
+            </div>
+          )}
+
+          {/* PK 提示横幅 */}
+          {pkPair && pkRound > 0 && (phase === 'day-discuss' || phase === 'day-vote') && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-rose-500/20 to-orange-500/20 border border-rose-400/30 flex items-center justify-center gap-2"
+            >
+              <span className="text-xs font-bold text-rose-200">⚖️ 平票PK</span>
+              <span className="text-[11px] text-amber-100/80">
+                {pkPair[0]}号 vs {pkPair[1]}号 · 仅可投此二人
+              </span>
+            </motion.div>
+          )}
         </header>
 
         {/* 玩家网格 */}
@@ -524,7 +764,14 @@ export function GameScreen() {
                           <div className="text-[10px] text-amber-200/60 mb-0.5">
                             {s.playerName} · {s.playerId}号
                           </div>
-                          <div className="leading-relaxed whitespace-pre-wrap break-words">{s.content}</div>
+                          {s.isUser ? (
+                            <div className="leading-relaxed whitespace-pre-wrap break-words">{s.content}</div>
+                          ) : (
+                            <TypewriterText
+                              text={s.content}
+                              className="leading-relaxed whitespace-pre-wrap break-words"
+                            />
+                          )}
                         </div>
                       </motion.div>
                     )
@@ -554,36 +801,27 @@ export function GameScreen() {
             </div>
           )}
 
-          {/* 警长竞选投票记录 */}
+          {/* 警长竞选投票记录 - 票型墙 */}
           {phase === 'day-sheriff-vote' && state.sheriffVotes.length > 0 && (
-            <div className="mt-2 glass-card rounded-2xl p-2">
-              <div className="text-xs text-amber-200/70 px-1 pb-1.5 flex items-center gap-1">
-                <Target className="w-3 h-3" /> 警长投票 ({state.sheriffVotes.length})
-              </div>
-              <div className="flex flex-wrap gap-1">
-                {state.sheriffVotes.map((v, i) => (
-                  <Badge key={i} variant="secondary" className="text-[10px] glass-card">
-                    {v.voterName}→{v.targetName || '弃票'}
-                  </Badge>
-                ))}
-              </div>
-            </div>
+            <VoteWall
+              votes={state.sheriffVotes}
+              players={players}
+              sheriffId={null}
+              title="警长投票"
+              revealed={true}
+            />
           )}
 
-          {/* 投票记录展示 */}
+          {/* 投票票型墙可视化 */}
           {phase === 'day-vote' && votes.length > 0 && (
-            <div className="mt-2 glass-card rounded-2xl p-2">
-              <div className="text-xs text-amber-200/70 px-1 pb-1.5 flex items-center gap-1">
-                <Target className="w-3 h-3" /> 已投票 ({votes.length}/{players.filter((p) => p.isAlive).length})
-              </div>
-              <div className="flex flex-wrap gap-1">
-                {votes.map((v, i) => (
-                  <Badge key={i} variant="secondary" className="text-[10px] glass-card">
-                    {v.voterName}→{v.targetName || '弃票'}
-                  </Badge>
-                ))}
-              </div>
-            </div>
+            <VoteWall
+              votes={votes}
+              players={players}
+              sheriffId={state.sheriffId}
+              title="放逐投票"
+              revealed={voteRevealed}
+              pkPair={pkPair && pkRound > 0 ? pkPair : undefined}
+            />
           )}
         </div>
 

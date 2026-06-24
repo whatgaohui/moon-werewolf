@@ -265,7 +265,7 @@ export function resolveNight(
 export function tallyVotes(
   votes: { voterId: number; targetId: number | null }[],
   sheriffId: number | null = null,
-): { winnerId: number | null; tie: boolean; counts: Record<number, number> } {
+): { winnerId: number | null; tie: boolean; counts: Record<number, number>; tieCandidates?: number[] } {
   const counts: Record<number, number> = {}
   for (const v of votes) {
     if (v.targetId !== null) {
@@ -278,7 +278,10 @@ export function tallyVotes(
   if (entries.length === 0) return { winnerId: null, tie: false, counts }
   entries.sort((a, b) => b.count - a.count)
   if (entries.length > 1 && entries[0].count === entries[1].count) {
-    return { winnerId: null, tie: true, counts }
+    // 收集所有并列最高票的候选（用于PK）
+    const topCount = entries[0].count
+    const tieCandidates = entries.filter((e) => e.count === topCount).map((e) => e.id)
+    return { winnerId: null, tie: true, counts, tieCandidates }
   }
   return { winnerId: entries[0].id, tie: false, counts }
 }

@@ -3,6 +3,7 @@
 import { useWerewolfStore } from '@/lib/werewolf/store'
 import { SpeechRound, GameEvent } from '@/lib/werewolf/types'
 import { GameLog } from './GameLog'
+import { TypewriterText } from './TypewriterText'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -38,7 +39,15 @@ function SpeechBubble({
         <div className="text-[10px] text-amber-200/60 mb-0.5">
           {playerName} · {playerId}号
         </div>
-        <div className="leading-relaxed whitespace-pre-wrap break-words">{content}</div>
+        {/* 用户发言直接显示，AI 发言用打字机效果 */}
+        {isUser ? (
+          <div className="leading-relaxed whitespace-pre-wrap break-words">{content}</div>
+        ) : (
+          <TypewriterText
+            text={content}
+            className="leading-relaxed whitespace-pre-wrap break-words"
+          />
+        )}
       </div>
     </div>
   )

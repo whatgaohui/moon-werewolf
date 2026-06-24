@@ -979,3 +979,274 @@ Stage Summary:
 - 事件日志: 6类事件(phase/death/sheriff/vote/skill/result)全程记录, 独立Tab按倒序展示
 - UI重构: 单一日志Sheet→三Tab信息面板(讨论/事件/日志), 讨论区快捷入口, 历史提示卡片
 - 其他职业: 猎人开枪(死亡触发,已有)+白狼王自爆(白天主动,新增) 覆盖所有白天技能需求
+
+---
+Task ID: 2-a
+Agent: ResultScreen 重构子代理
+Task: 重构 ResultScreen 加入时间轴复盘 + 关键数据统计
+
+Work Log:
+- 读取 worklog.md (重点了解 Task 22/23 的 store/events/speechHistory 重构背景),
+  并通读 ResultScreen.tsx / InfoPanel.tsx / types.ts / roles.ts / store.ts 中的事件发射点,
+  梳理出可消费的 GameEvent 完整形态 (category/icon/title/detail/day/timestamp) 与
+  关键事件图标约定 (🌙夜降临 / ☀️天亮 / 💀死亡 / 🗳️放逐 / ⚖️平票PK / 🏛️警长当选 /
+  👑警徽移交 / 💥白狼王自爆 / 🏹猎人开枪)
+
+- 重写 /home/z/my-project/src/components/werewolf/ResultScreen.tsx (186→~830行),
+  保留原有 5 个区块 (胜负标题/玩家身份揭晓/阵营统计/我的角色总结/操作按钮),
+  新增 3 个区块并按"胜负标题 → 对局数据 → 玩家身份揭晓 → 阵营统计 → 时间轴复盘 →
+  关键操作高亮 → 我的角色总结 → 操作按钮"顺序排列:
+
+  1. **对局数据** (胜负标题下方): 6 宫格 StatCard
+     - 对局时长 (gameStartTime → 锁定的 endTime, mm:ss 格式)
+     - 总天数 (max(events.day), 兜底 user.deathDay)
+     - 存活/总 (alive/total)
+     - AI 难度 (easy=简单/normal=普通/hard=困难, 带颜色徽章)
+     - 胜利规则 (tu-bian=屠边 / tu-cheng=屠城)
+     - 对局规模 (playerCount 人)
+     - 时长通过 useState(() => Date.now()) 锁定, 避免持续重渲染
+
+  2. **时间轴复盘** (阵营统计下方):
+     - buildTimeline(events): 按 timestamp 升序, phase 事件作为片段边界
+       - title 含"夜降临" → 开启新 "第N夜" 片段 (紫色)
+       - title 含"天亮"   → 开启新 "第N天" 片段 (琥珀色)
+       - 其它事件 (death/vote/sheriff/skill) 归入当前片段
+     - TimelineSectionView: 片段头部 (🌙/☀️ + 标签 + 事件数 Badge + 夜间/白天副标签)
+       + 左侧竖线 (left-[7px] 渐变 amber) + 节点圆点 (NODE_COLOR 按 category 着色,
+       ring-2 ring-background 与背景分离)
+     - TimelineNode: 紧凑卡片 (EVENT_COLOR 按 category 着色, 与 InfoPanel.EventItem
+       完全对齐), framer-motion 错峰入场动画
+
+  3. **关键操作高亮** (时间轴下方):
+     - extractKeyActions(events, players): 自动从事件流提取 7 类关键操作
+       a. 守卫守护成功 (phase + title 含"平安夜" → 推断狼刀被挡)
+       b. 女巫毒中狼人 (death + detail/title 含"毒" + 死者 isWolf)
+       c. 猎人开枪带走 (skill + icon 🏹 + title 含"猎人开枪")
+       d. 白狼王自爆带走 (skill + icon 💥 + title 含"白狼王自爆")
+       e. 警长当选 (sheriff + title 含"当选警长")
+       f. 警徽流执行 (sheriff + title 含"警徽移交")
+       g. 投票平票PK (vote + icon ⚖️ + title 含"平票")
+     - KeyActionCard: 2 列网格, 三色 tone (good=emerald / wolf=rose / neutral=violet)
+       配 emoji 图标背景圆角, spring 入场动画
+
+- 优化细节:
+  - 阵营统计卡新增存活数 Badge (狼/好各一), 第一行展示 {alive}/{total} 存活
+  - 我的角色总结新增 user.id 标识与 userRole.description 一行
+  - 玩家身份揭晓网格响应式 grid-cols-3 sm:grid-cols-4
+  - 胜负标题下方追加 winnerCause 文案展示
+  - 整体卡片间距收紧 (mb-4), 移动端 px-4 sm:px-6 适配
+
+- 修复 lint 错误 (2 轮迭代):
+  1. 首版在 hooks 之前 early return → react-hooks/rules-of-hooks 报错 3 处
+     → 重排: 所有 hooks (useWerewolfStore × 9, useState, useMemo × 3) 提前到
+     `if (!user || !winner) return null` 之前, userWon 用 `user?.role ?? 'villager'`
+     守卫避免空指针
+  2. set-state-in-effect 规则触发 → 删除冗余 setMounted useEffect
+     (原本是防止 hydration 的保险, 实际上 ResultScreen 是纯客户端组件且 endTime
+     通过 useState 初始化器锁定, 不需要 effect)
+
+- 验证:
+  ✓ bun run lint: 0 错误 0 警告
+  ✓ bunx tsc --noEmit: ResultScreen.tsx 0 错误 (剩余错误均为预存在的
+    examples/skills/route.ts 问题, 非本次引入)
+
+Stage Summary:
+- 产出 /home/z/my-project/src/components/werewolf/ResultScreen.tsx 完整重写版 (~830 行)
+- 结算页从"仅胜负+身份"升级为"胜负+对局数据+身份+阵营+时间轴复盘+关键操作+我的总结"
+- 时间轴按"夜→天"自动分片段, 每片段内左侧竖线 + 节点圆点 + 按 category 着色卡片
+- 关键操作自动识别 7 类高光时刻 (守卫守护/女巫毒狼/猎人开枪/白狼王自爆/警长当选/
+  警徽流/平票PK), 三色 tone 区分好人/狼人/中性
+- 复用 InfoPanel 的事件配色, 保持暗夜主题 (amber/violet/rose) 与毛玻璃风格统一
+- 0 lint 错误, 0 类型错误, 移动端友好, 可供主代理端到端验证
+
+---
+Task ID: 2-b
+Agent: BeginnerGuide/RuleSheet 组件子代理
+Task: 新建 BeginnerGuide.tsx + RuleSheet.tsx 组件
+
+Work Log:
+- 阅读 worklog.md 了解项目背景与 1/2-a/3-9 已完成的工作
+- 阅读 types.ts (GamePhase/WerewolfGameState), store.ts (markGuideSeen/seenGuide/userPlayerId), roles.ts (RoleId), InfoPanel.tsx (样式参考), sheet.tsx (Sheet 组件), popover.tsx (参考不用), GameScreen.tsx (PHASE_INFO)
+- 新建 src/components/werewolf/BeginnerGuide.tsx
+  - 定义 GUIDE_CONTENT 映射表（12 条引导，覆盖 role-reveal / 夜间角色行动 / 白天发言投票 / 警长竞选 / 猎人开枪 / 警徽移交）
+  - 实现 buildGuideKey(phase, user) 函数：根据阶段 + 用户角色构造引导 key（区分 仅phase / phase:user / phase:user:role 三类）
+  - 使用 useSyncExternalStore 订阅 localStorage `werewolf_guide_disabled` 实现"不再提示"全局开关（避免 SSR 不匹配 + 同窗口 storage 事件同步）
+  - activeKey 在 render 中通过 useMemo 派生（避免 useEffect setState 触发 ESLint react-hooks/set-state-in-effect 警告）
+  - dismissedKey 本地状态防止 markGuideSeen 写入 store 期间的瞬间闪烁
+  - AnimatePresence + motion 弹簧动画：底部居中浮层卡片，半透明遮罩可点击关闭
+  - amber/violet 配色，glass-card-strong 背景，"知道了" amber 渐变按钮 + "不再提示" violet ghost 按钮
+- 新建 src/components/werewolf/RuleSheet.tsx
+  - 定义 RULES 映射表（12 个阶段的规则文案 + 部分阶段的 tips 提示）
+  - PHASE_META 映射表为每个 GamePhase 提供图标 + 标签
+  - 使用 shadcn/ui Sheet/SheetContent/SheetHeader/SheetTitle/SheetTrigger 组合
+  - 触发按钮：圆形 ghost glass-card + BookOpen 图标，hover amber 边框
+  - Sheet 从右侧滑出，宽度 w-[88%] sm:w-[420px]
+  - 顶部阶段头：第N天 + 黑夜/白天 + 阶段名 + 渐变背景（黑夜 violet/indigo，白天 amber/rose）
+  - 规则列表带 amber 圆点，提示列表带 💡 图标 + violet 背景框
+  - 底部"通用流程"摘要永久展示，新手友好
+- 运行 `bun run lint` 通过（最初遇到 set-state-in-effect 错误，已通过派生 state + useSyncExternalStore 修复）
+- 运行 `bunx tsc --noEmit` 确认两个新文件无类型错误（项目其他预存错误与本任务无关）
+
+Stage Summary:
+- 产出 src/components/werewolf/BeginnerGuide.tsx（首次进入各阶段的气泡式新手引导，支持单条关闭 + 全局"不再提示"）
+- 产出 src/components/werewolf/RuleSheet.tsx（对局内常驻"规则"按钮 + 右侧滑出 Sheet，按当前阶段展示对应规则）
+- 两个组件均 'use client'、严格 TS、零 any、framer-motion 动画、lucide-react 图标、glass-card 配色
+- ESLint 通过、类型检查通过，可由主代理直接 import 渲染
+- 下一步建议主代理：在 GameScreen.tsx 顶部布局中渲染 <BeginnerGuide /> 和 <RuleSheet />（RuleSheet 推荐放在顶部状态栏右侧或右下角悬浮）
+
+---
+Task ID: 2-c
+Agent: ConfirmDialog/TypewriterText 组件子代理
+Task: 新建 ConfirmDialog.tsx + TypewriterText.tsx 通用组件
+
+Work Log:
+- 读取 worklog.md 了解前序代理工作（BeginnerGuide/RuleSheet 已建立的 framer-motion + glass-card 视觉语言）
+- 读取 types.ts 确认 confirmDialog / speechSpeed 状态字段；读取 store.ts 确认 closeConfirmDialog / showConfirmDialog / setSpeechSpeed actions 签名
+- 读取 SeerResultDialog.tsx / ToastTip.tsx / InfoPanel.tsx 作为视觉与动画风格参考
+- 检查 shadcn/ui dialog.tsx 已存在（默认 bg-black/50 遮罩 + CSS zoom-in 动画），但其遮罩色与动画无法通过 props 自定义为任务要求的 bg-black/60 + framer-motion scale/opacity；故依据任务"Important"兜底条款，采用 framer-motion + fixed 定位自实现（与 SeerResultDialog 完全一致的项目内既有弹窗模式）
+- 创建 src/components/werewolf/ConfirmDialog.tsx：
+  - 监听 store.confirmDialog，AnimatePresence 包裹条件渲染
+  - 外层 motion.div：fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm，遮罩点击 = 取消
+  - 内层 motion.div：spring 入场动画 (scale 0.85→1, opacity 0→1, y 16→0, bounce 0.32)
+  - danger=true：红色渐变背景 (from-red-950 via-rose-950) + AlertTriangle 图标 + red-500/rose-600 确认按钮渐变 + red-400/60 边框 + red-500/35 警示光晕
+  - danger=false：amber 渐变背景 + AlertCircle 图标 + amber-500/orange-600 确认按钮渐变 + amber-400/60 边框
+  - 标题区图标徽章 (w-10 h-10 rounded-xl)，描述区 pl-[3.25rem] 与标题对齐
+  - 取消按钮 glass-card + amber 边框；两按钮等宽 + active:scale-95 微交互
+  - 确认逻辑：先取出 onConfirm 引用 → closeConfirmDialog() → 调用 onConfirm()，避免 store 状态变化污染回调
+  - role="dialog" aria-modal aria-labelledby/describedby 完整无障碍属性
+- 创建 src/components/werewolf/TypewriterText.tsx：
+  - props: { text, speed?, onComplete?, className?, showCursor?=true }
+  - SPEED_MS 映射：slow=60ms / normal=25ms / fast=0ms
+  - speed 未传时回落 useWerewolfStore(s => s.speechSpeed)
+  - 状态机：displayedLength (useState) + prevText (prop 变化检测) + completedRef (一次性完成标记) + onCompleteRef (避免 stale closure)
+  - text 变化检测采用 React 19 官方推荐「render 期调整 state」模式（if text !== prevText → setPrevText + setDisplayedLength(0)）
+  - 完成标记重置独立 useEffect([text])，声明在 typewriter effect 之前确保顺序（refs 不可在 render 期写入，由 lint 规则 react-hooks/refs 强制）
+  - fast 模式（interval===0）通过派生 visibleLength = isFastMode ? text.length : displayedLength 实现，避免 effect 内 setState 触发级联渲染
+  - 递归 setTimeout 实现逐字渲染（setState 仅在异步回调中调用，符合 react-hooks/set-state-in-effect 规则）
+  - 容器 onClick 触发 skip：非完成且非 fast 模式时 setDisplayedLength(text.length)
+  - 光标：animate-pulse | 字符，aria-hidden 装饰，仅 typing 中显示
+  - whitespace-pre-wrap break-words leading-relaxed 保持换行与可读性
+  - 容器 cursor-pointer 仅在 typing 中显示
+- 运行 `bun run lint`：首次遇到 react-hooks/set-state-in-effect（fast 模式同步 setState）+ react-hooks/refs（render 期写 ref）两个错误，通过派生 state + 拆分 effect 修复后通过
+- 运行 `bunx tsc --noEmit` 确认新文件零类型错误（项目其他预存错误与本任务无关）
+
+Stage Summary:
+- 产出 src/components/werewolf/ConfirmDialog.tsx（高风险操作二次确认弹窗，danger/amber 双主题，framer-motion spring 动画，bg-black/60 加深遮罩）
+- 产出 src/components/werewolf/TypewriterText.tsx（AI 发言打字机组件，三档速度，点击跳过，onComplete 一次性回调，store.speechSpeed 自动同步）
+- 两组件均 'use client'、严格 TS、零 any、framer-motion 动画、lucide-react 图标、cn 工具函数
+- ESLint 通过、TypeScript 通过，可由主代理直接 import 渲染
+- 下一步建议主代理：
+  1) 在 GameScreen.tsx 顶层挂载 <ConfirmDialog />（与 ToastTip / SeerResultDialog 同位置）
+  2) 在 InfoPanel 的 SpeechBubble 中将 content 包裹为 <TypewriterText text={content} />（isUser 气泡可保持原文，仅 AI 气泡用打字机）
+  3) 在 SetupScreen 设置面板露出 speechSpeed 三档切换（store.setSpeechSpeed）
+
+---
+Task ID: 24 (竞品分析对齐 - UI/UX 全面重构)
+Agent: 主代理 (Z.ai Code)
+Task: 基于狼人杀APP竞品分析文档，全面重构交互体验：投票票型墙/发言进度条/速度控制/平票PK/新手引导/规则入口/结算页时间轴复盘/高风险确认弹窗/AI打字机效果
+
+Work Log:
+- 【需求分析】对照竞品分析文档 §3.1-3.8 识别 P0 关键缺口：
+  1. 投票票型墙可视化（§3.4）→ 当前仅 Badge 列表
+  2. 发言进度条（§3.3）→ 当前无进度指示
+  3. 发言速度控制（§3.3）→ 当前无调速
+  4. 平票PK流程（§3.4）→ 当前平票直接"无人出局"
+  5. 新手引导气泡（§3.7）→ 首次进入各阶段无引导
+  6. 规则入口（§3.7）→ 顶部无常驻规则按钮
+  7. 结算页时间轴复盘（§3.6）→ 当前仅身份揭晓+阵营统计
+  8. 高风险操作二次确认（§3.2/3.4）→ 女巫毒药/猎人开枪/白狼王自爆无确认
+  9. AI打字机效果（§3.3）→ 当前一次性弹出
+
+- 【Phase 1 数据层】types.ts + store.ts + engine.ts
+  types.ts 新增字段：
+  - speechSpeed: 'slow'|'normal'|'fast' (发言展示速度)
+  - seenGuide: Record<string,boolean> (新手引导已看过)
+  - pkPair: number[]|null (平票PK候选)
+  - pkRound: number (PK轮次)
+  - voteRevealed: boolean (投票结果公布状态)
+  - gameStartTime: number (对局开始时间戳)
+  - confirmDialog: {...}|null (高风险确认弹窗状态)
+  - speakTotal: number (本轮总发言人数)
+  store.ts 新增 actions：
+  - setSpeechSpeed, markGuideSeen, showConfirmDialog, closeConfirmDialog
+  engine.ts 增强：
+  - tallyVotes 返回 tieCandidates[] 用于PK
+  store.ts 平票PK流程：
+  - day-discuss: PK模式仅 pkPair 两人发言（isPK分支）
+  - day-vote: PK模式仅可投 pkPair（selectableTargets限制 + AI投票校验）
+  - 平票首轮 + 存活>2 → 进入PK（重新发言+重新投票）
+  - voteRevealed 公布后延迟1.5s 留票型墙展示时间
+  - night-start 重置 pkPair/pkRound/voteRevealed
+  - 修复死亡用户卡死警长竞选bug：!userAlive 视为已决定不上警
+
+- 【Phase 2-a ResultScreen 重构】子代理完成
+  - 831行重构，新增3区块：对局数据/时间轴复盘/关键操作
+  - 6宫格StatCard：时长/天数/存活比/难度/规则/规模
+  - buildTimeline() 按timestamp升序，phase事件切分"第N夜/第N天"片段
+  - extractKeyActions() 自动识别7类高光时刻
+
+- 【Phase 2-b BeginnerGuide + RuleSheet】子代理完成
+  - BeginnerGuide.tsx (340行): 12条引导文案，按 phase+role 构造key
+    useSyncExternalStore 订阅 localStorage "不再提示"开关
+    AnimatePresence 弹簧动画 + 半透明遮罩
+  - RuleSheet.tsx (243行→370行): 12+阶段规则文案，Sheet从右滑出
+    主代理补充 day-sheriff-campaign/vote/day-announce/lastwords/self-destruct/result 7个缺失阶段
+
+- 【Phase 2-c ConfirmDialog + TypewriterText】子代理完成
+  - ConfirmDialog.tsx (148行): framer-motion自实现，danger双主题
+    红色警示色 + AlertTriangle 图标
+  - TypewriterText.tsx (117行): 3档速度(60/25/0ms)，点击跳过
+    React 19规范（render期state调整 + ref守卫）
+
+- 【Phase 3 GameScreen 集成】主代理完成
+  - VoteWall 组件（新增，120行）：票型墙可视化
+    每个被投玩家一列，下方聚集投票者头像
+    警长1.5票特殊标记（紫色ring）
+    revealed时高亮最高票（红色ring）
+    PK模式仅展示pkPair
+    弃票单独一列
+  - 发言进度条：mt-1.5 进度条 + "N/M" 或 "PK N/M"
+  - 速度控制：3按钮组（Snail/Gauge/Zap图标），仅白天阶段显示
+  - PK提示横幅：⚖️ 平票PK + "X号 vs Y号 · 仅可投此二人"
+  - selectableTargets PK限制：只能投 pkPair
+  - handleConfirm 高风险确认：
+    * 女巫毒药 → "确认使用毒药？该操作不可撤销！"
+    * 猎人开枪 → "确认开枪？该操作不可撤销！"
+    * 白狼王自爆 → "确认自爆？该操作不可撤销！"
+  - InfoPanel SpeechBubble + GameScreen讨论区：AI发言用TypewriterText
+  - 顶部header新增 RuleSheet 按钮（BookOpen图标，aria-label="查看规则"）
+  - 渲染树新增 <ConfirmDialog/> + <BeginnerGuide/>
+
+- 【端到端验证 agent-browser 6人新手局】
+  - 选预言家开局→夜杀→(死亡用户)警长竞选不再卡死→竞选发言→警长投票
+  - 重开选女巫→夜杀1号(我)→女巫阶段测试：
+    ✓ BeginnerGuide 弹出"新手引导·女巫行动"，知道了按钮关闭
+    ✓ 解药选择UI正常（今晚1号被刀）
+    ✓ 毒药选择+确认触发 ConfirmDialog "确认使用毒药？" 
+    ✓ 取消按钮正确关闭弹窗，不执行操作
+  - 白天讨论：
+    ✓ 发言进度条 "2/5" 显示
+    ✓ 速度控制3按钮可见可点击
+    ✓ AI状态指示器 "🎤 揽月(5号)正在发言..."
+  - 投票放逐：5号被放逐（toast提示）
+  - 游戏结束→ResultScreen：
+    ✓ 对局数据6宫格：07:13/1天/3存活/简单/屠边/6人
+    ✓ 时间轴复盘：8条事件，第1夜片段（夜降临/警长当选/夜间死亡/投票放逐）
+    ✓ 关键操作区块
+  - 0 控制台错误（仅shadcn Sheet的aria-describedby警告，预存在）
+  - 0 编译错误，lint通过
+  - LLM 429限流仍存在（预存在问题），fallback决策保证游戏推进
+
+Stage Summary:
+- 9大竞品分析P0缺口全部修复
+- 投票票型墙：候选列+投票者头像聚集+警长1.5票标记+最高票高亮
+- 发言进度条：实时显示 N/M + PK模式标识
+- 速度控制：慢/正常/极速3档，影响AI打字机速度
+- 平票PK：完整流程（重新发言+重新投票），PK模式限制仅投pkPair
+- 新手引导：12阶段气泡式引导，"不再提示"一键全关
+- 规则入口：常驻BookOpen按钮，12+阶段规则文案
+- 结算页时间轴：8条事件按夜/天分组，6宫格数据统计，7类关键操作高亮
+- 高风险确认：女巫毒药/猎人开枪/白狼王自爆3类操作，红色警示弹窗
+- AI打字机：3档速度(60/25/0ms)，点击跳过，光标闪烁
+- 修复死亡用户卡死警长竞选bug
+- 子代理3个并行任务，主代理集成，端到端验证通过

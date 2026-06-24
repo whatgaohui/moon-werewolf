@@ -164,6 +164,9 @@ export interface VoteRecord {
   targetName: string | null
 }
 
+// 发言展示速度档位（影响 AI 发言打字机动画速度 + 阶段间过渡）
+export type SpeechSpeed = 'slow' | 'normal' | 'fast'
+
 // 游戏状态
 export interface WerewolfGameState {
   view: 'menu' | 'setup' | 'role-reveal' | 'game' | 'result'
@@ -181,6 +184,7 @@ export interface WerewolfGameState {
   currentSpeaker: number | null  // 当前发言玩家id
   speakStartIdx: number | null   // 本轮发言起始索引
   speakCount: number             // 本轮已发言人数
+  speakTotal: number             // 本轮总发言人数（用于进度条）
   winner: Faction | null
   winnerCause: string | null     // 胜负原因（屠民/屠神/屠狼）
   // 临时状态
@@ -209,4 +213,19 @@ export interface WerewolfGameState {
   toast: { id: string; content: string; type: 'info' | 'success' | 'danger' } | null
   // 投票超时
   voteDeadline: number | null        // 投票截止时间戳（用户30秒未投票自动弃票）
+  // === Phase 1 新增字段（竞品分析对齐） ===
+  speechSpeed: SpeechSpeed            // 发言展示速度档位（slow/normal/fast）
+  seenGuide: Record<string, boolean>  // 新手引导已看过标记（key = 阶段标识）
+  pkPair: number[] | null             // 平票PK候选玩家id（null=非PK轮）
+  pkRound: number                     // 当前PK轮次（0=正常, 1=PK1轮, 2=PK2轮）
+  voteRevealed: boolean               // 投票结果是否已公布（控制票型墙动画）
+  gameStartTime: number               // 对局开始时间戳（用于结算页时长统计）
+  confirmDialog: {
+    title: string
+    desc: string
+    confirmText?: string
+    cancelText?: string
+    danger?: boolean
+    onConfirm: () => void
+  } | null                            // 高风险操作二次确认弹窗状态
 }

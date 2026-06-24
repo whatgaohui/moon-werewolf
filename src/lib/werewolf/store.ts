@@ -13,6 +13,7 @@ import {
   RoleId,
   Difficulty,
   DeathCause,
+  SpeechSpeed,
 } from './types'
 import { ROLES, isWolf, GOD_ROLES } from './roles'
 import {
@@ -79,6 +80,22 @@ interface WerewolfStore extends WerewolfGameState {
   proceedNightPhase: () => Promise<void>
   proceedDayPhase: () => Promise<void>
 
+  // === Phase 1 新增 actions（竞品分析对齐） ===
+  // 设置发言展示速度
+  setSpeechSpeed: (speed: SpeechSpeed) => void
+  // 标记某阶段新手引导已看过
+  markGuideSeen: (key: string) => void
+  // 打开/关闭高风险确认弹窗
+  showConfirmDialog: (cfg: {
+    title: string
+    desc: string
+    confirmText?: string
+    cancelText?: string
+    danger?: boolean
+    onConfirm: () => void
+  }) => void
+  closeConfirmDialog: () => void
+
   // 内部
   _setProcessing: (v: boolean) => void
   _setPhase: (p: GamePhase) => void
@@ -125,6 +142,15 @@ const initialState: WerewolfGameState = {
   seerResultPending: null,
   toast: null,
   voteDeadline: null,
+  // === Phase 1 新增字段初始值 ===
+  speakTotal: 0,
+  speechSpeed: 'normal',
+  seenGuide: {},
+  pkPair: null,
+  pkRound: 0,
+  voteRevealed: false,
+  gameStartTime: 0,
+  confirmDialog: null,
 }
 
 // ============ AI 视角隔离的请求构建 (v2.0 §1.1.2) ============
@@ -396,6 +422,7 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
         log,
         winner: null,
         winnerCause: null,
+        gameStartTime: Date.now(),  // 记录对局开始时间（用于结算页时长统计）
       })
     },
 
@@ -436,6 +463,15 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
 
     _setProcessing: (v) => set({ processing: v }),
     _setPhase: (p) => set({ phase: p }),
+
+    // === Phase 1 新增 actions 实现 ===
+    setSpeechSpeed: (speed) => set({ speechSpeed: speed }),
+
+    markGuideSeen: (key) =>
+      set((s) => ({ seenGuide: { ...s.seenGuide, [key]: true } })),
+
+    showConfirmDialog: (cfg) => set({ confirmDialog: cfg }),
+    closeConfirmDialog: () => set({ confirmDialog: null }),
 
     // 归档当前轮次发言到历史（跨天保留），仅在 speeches 非空时归档
     _archiveSpeeches: (label: string) => {
@@ -869,10 +905,11 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
         if (state.phase === 'day-sheriff-campaign') {
           const alive = alivePlayers(state.players)
           const userId = state.userPlayerId
+          const userAlive = alive.some((p) => p.id === userId)
           let candidates = [...state.sheriffCandidates]
 
-          // 用户先决定是否上警
-          const userDecided = candidates.includes(userId) || state.sheriffCampaignIdx > 0 || get()._aiSheriffDecided
+          // 用户先决定是否上警（死亡用户视为已决定不上警）
+          const userDecided = !userAlive || candidates.includes(userId) || state.sheriffCampaignIdx > 0 || get()._aiSheriffDecided
           if (!userDecided) {
             set({ processing: false })
             return
@@ -1121,7 +1158,8 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
             return
           }
           // 进入白天讨论：白狼王技能可用（白天可主动自爆）
-          set({ phase: 'day-discuss', speeches: [], currentSpeaker: null, speakStartIdx: null, speakCount: 0, processing: false, whiteWolfSkillAvailable: true })
+          const aliveForDiscuss = alivePlayers(state.players)
+          set({ phase: 'day-discuss', speeches: [], currentSpeaker: null, speakStartIdx: null, speakCount: 0, speakTotal: aliveForDiscuss.length, processing: false, whiteWolfSkillAvailable: true, pkPair: null, pkRound: 0, voteRevealed: false })
           await delay(600)
           get().proceedDayPhase()
           return
@@ -1148,7 +1186,8 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
             }
             get()._archiveSpeeches(`第${day}天·遗言`)
             // 进入白天讨论：白狼王技能可用
-            set({ phase: 'day-discuss', speeches: [], currentSpeaker: null, speakStartIdx: null, speakCount: 0, processing: false, whiteWolfSkillAvailable: true })
+            const aliveForDiscuss2 = alivePlayers(state.players)
+            set({ phase: 'day-discuss', speeches: [], currentSpeaker: null, speakStartIdx: null, speakCount: 0, speakTotal: aliveForDiscuss2.length, processing: false, whiteWolfSkillAvailable: true, pkPair: null, pkRound: 0, voteRevealed: false })
             await delay(500)
             get().proceedDayPhase()
             return
@@ -1194,56 +1233,70 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
         // ---- 白天讨论（绕回发言，所有人发言一次） ----
         if (state.phase === 'day-discuss') {
           const alive = alivePlayers(state.players)
+          // PK 模式：仅 pkPair 中两人发言
+          const isPK = state.pkPair !== null && state.pkRound > 0
+          const speakers = isPK ? alive.filter((p) => state.pkPair!.includes(p.id)) : alive
           if (state.currentSpeaker === null) {
-            // 警长决定起始：从警长右边开始；无警长则随机
-            let startIdx: number
-            if (state.sheriffId !== null) {
-              const sheriffIdx = alive.findIndex((p) => p.id === state.sheriffId)
-              startIdx = sheriffIdx >= 0 ? (sheriffIdx + 1) % alive.length : Math.floor(Math.random() * alive.length)
+            if (isPK) {
+              // PK 模式：pkPair[0] 先发言
+              set({
+                currentSpeaker: state.pkPair![0],
+                speakStartIdx: 0,
+                speakCount: 0,
+                speakTotal: 2,
+              })
             } else {
-              startIdx = Math.floor(Math.random() * alive.length)
-            }
-            set({
-              currentSpeaker: alive[startIdx].id,
-              speakStartIdx: startIdx,
-              speakCount: 0,
-            })
+              // 警长决定起始：从警长右边开始；无警长则随机
+              let startIdx: number
+              if (state.sheriffId !== null) {
+                const sheriffIdx = alive.findIndex((p) => p.id === state.sheriffId)
+                startIdx = sheriffIdx >= 0 ? (sheriffIdx + 1) % alive.length : Math.floor(Math.random() * alive.length)
+              } else {
+                startIdx = Math.floor(Math.random() * alive.length)
+              }
+              set({
+                currentSpeaker: alive[startIdx].id,
+                speakStartIdx: startIdx,
+                speakCount: 0,
+                speakTotal: alive.length,
+              })
 
-            // AI 白狼王主动自爆评估（v2.0 §8.8 白狼王白天可发动技能）
-            // 仅在第2天及以后、AI白狼王存活时评估；使用启发式避免额外LLM调用
-            const aiWhiteWolf = alive.find((p) => !p.isUser && p.role === 'white-wolf')
-            if (aiWhiteWolf && day >= 2) {
-              // 评估条件：狼人阵营处于劣势（狼数<=神职暴露数+1）或随机触发
-              const wolves = aliveWolves(alive)
-              const exposedGods = alive.filter((p) =>
-                p.role !== 'wolf' && p.role !== 'white-wolf' && p.role !== 'villager' && p.isUser,
-              )
-              const disadvantage = wolves.length <= exposedGods.length + 1
-              const rand = Math.random()
-              const difficulty = state.config?.difficulty || 'normal'
-              // 老练档更倾向战略性自爆
-              const baseProb = difficulty === 'hard' ? 0.18 : difficulty === 'normal' ? 0.12 : 0.08
-              const shouldBomb = disadvantage ? (rand < baseProb * 1.5) : (rand < baseProb * 0.5)
-              if (shouldBomb) {
-                // 选择目标：优先已暴露的神职（预言家>女巫>守卫>猎人），否则随机好人
-                const targetPriority = ['seer', 'witch', 'guard', 'hunter']
-                let targetId: number | null = null
-                for (const role of targetPriority) {
-                  // 优先选用户（已暴露）的神职
-                  const exposed = alive.find((p) => p.role === role && p.isUser)
-                  if (exposed) { targetId = exposed.id; break }
-                }
-                if (targetId === null) {
-                  // 否则从好人中随机选一个非白狼王
-                  const goodTargets = alive.filter((p) => p.id !== aiWhiteWolf.id && !isWolf(p.role))
-                  targetId = goodTargets.length > 0 ? randomPick(goodTargets)!.id : null
-                }
-                if (targetId !== null) {
-                  set({ whiteWolfSelfDestructPending: aiWhiteWolf.id, phase: 'day-self-destruct', processing: false })
-                  get().showToast(`💥 ${aiWhiteWolf.name}(${aiWhiteWolf.id}号) 白狼王发动自爆！`, 'danger')
-                  await delay(600)
-                  get().proceedDayPhase()
-                  return
+              // AI 白狼王主动自爆评估（v2.0 §8.8 白狼王白天可发动技能）
+              // 仅在第2天及以后、AI白狼王存活时评估；使用启发式避免额外LLM调用
+              const aiWhiteWolf = alive.find((p) => !p.isUser && p.role === 'white-wolf')
+              if (aiWhiteWolf && day >= 2) {
+                // 评估条件：狼人阵营处于劣势（狼数<=神职暴露数+1）或随机触发
+                const wolves = aliveWolves(alive)
+                const exposedGods = alive.filter((p) =>
+                  p.role !== 'wolf' && p.role !== 'white-wolf' && p.role !== 'villager' && p.isUser,
+                )
+                const disadvantage = wolves.length <= exposedGods.length + 1
+                const rand = Math.random()
+                const difficulty = state.config?.difficulty || 'normal'
+                // 老练档更倾向战略性自爆
+                const baseProb = difficulty === 'hard' ? 0.18 : difficulty === 'normal' ? 0.12 : 0.08
+                const shouldBomb = disadvantage ? (rand < baseProb * 1.5) : (rand < baseProb * 0.5)
+                if (shouldBomb) {
+                  // 选择目标：优先已暴露的神职（预言家>女巫>守卫>猎人），否则随机好人
+                  const targetPriority = ['seer', 'witch', 'guard', 'hunter']
+                  let targetId: number | null = null
+                  for (const role of targetPriority) {
+                    // 优先选用户（已暴露）的神职
+                    const exposed = alive.find((p) => p.role === role && p.isUser)
+                    if (exposed) { targetId = exposed.id; break }
+                  }
+                  if (targetId === null) {
+                    // 否则从好人中随机选一个非白狼王
+                    const goodTargets = alive.filter((p) => p.id !== aiWhiteWolf.id && !isWolf(p.role))
+                    targetId = goodTargets.length > 0 ? randomPick(goodTargets)!.id : null
+                  }
+                  if (targetId !== null) {
+                    set({ whiteWolfSelfDestructPending: aiWhiteWolf.id, phase: 'day-self-destruct', processing: false })
+                    get().showToast(`💥 ${aiWhiteWolf.name}(${aiWhiteWolf.id}号) 白狼王发动自爆！`, 'danger')
+                    await delay(600)
+                    get().proceedDayPhase()
+                    return
+                  }
                 }
               }
             }
@@ -1252,9 +1305,9 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
           const currentId = get().currentSpeaker
           const speakCount = get().speakCount
 
-          if (currentId === null || speakCount >= alive.length) {
+          if (currentId === null || speakCount >= speakers.length) {
             // 进入投票阶段：白狼王技能仍可用（投票前最后一刻可自爆）
-            set({ phase: 'day-vote', currentSpeaker: null, votes: [], processing: false, voteDeadline: Date.now() + 30000, whiteWolfSkillAvailable: true })
+            set({ phase: 'day-vote', currentSpeaker: null, votes: [], processing: false, voteDeadline: Date.now() + 30000, whiteWolfSkillAvailable: true, voteRevealed: false })
             startVoteTimer()
             await delay(500)
             get().proceedDayPhase()
@@ -1263,9 +1316,9 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
 
           const speaker = get().players.find((p) => p.id === currentId)
           if (!speaker || !speaker.isAlive) {
-            const idx = alive.findIndex((p) => p.id === currentId)
-            const nextIdx = (idx + 1) % alive.length
-            set({ currentSpeaker: alive[nextIdx].id })
+            const idx = speakers.findIndex((p) => p.id === currentId)
+            const nextIdx = (idx + 1) % speakers.length
+            set({ currentSpeaker: speakers[nextIdx].id })
             get().proceedDayPhase()
             return
           }
@@ -1296,10 +1349,10 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
           })
           await delay(800)
 
-          const idx = alive.findIndex((p) => p.id === currentId)
-          const nextIdx = (idx + 1) % alive.length
+          const idx = speakers.findIndex((p) => p.id === currentId)
+          const nextIdx = (idx + 1) % speakers.length
           const newCount = get().speakCount + 1
-          set({ currentSpeaker: alive[nextIdx].id, speakCount: newCount, processing: false })
+          set({ currentSpeaker: speakers[nextIdx].id, speakCount: newCount, processing: false })
           get().proceedDayPhase()
           return
         }
@@ -1347,6 +1400,9 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
           const votedIds = new Set(existingVotes.map((v) => v.voterId))
           const userVoted = votedIds.has(state.userPlayerId)
           const userAlive = alive.some((p) => p.id === state.userPlayerId)
+          // PK 模式：投票只能投 pkPair 中的玩家
+          const isPK = state.pkPair !== null && state.pkRound > 0
+          const pkPair = state.pkPair
 
           if (userAlive && !userVoted) {
             set({ processing: false })
@@ -1357,6 +1413,11 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
           for (const p of alive) {
             if (p.isUser) continue
             if (votedIds.has(p.id)) continue
+            // PK 候选人不参与投票（仅被投）
+            if (isPK && pkPair && pkPair.includes(p.id)) {
+              votedIds.add(p.id)
+              continue
+            }
             const aiVisible = buildAIVisibleInfo(get(), p.id, getSeerHistory(get(), p.id))
             const aiRes = await callAI({
               action: 'day-vote',
@@ -1365,10 +1426,19 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
               speeches: get().speeches,
               day,
             })
-            const targetId = aiRes?.targetId ?? null
-            // 校验：不能投自己、不能投已死玩家
-            const valid = targetId !== null && targetId !== p.id && alive.find((pp) => pp.id === targetId)
-            const finalTarget = valid ? targetId : null
+            let targetId = aiRes?.targetId ?? null
+            // PK 模式校验：只能投 pkPair 中的玩家
+            if (isPK && pkPair) {
+              if (targetId === null || !pkPair.includes(targetId)) {
+                // 随机选一个 pkPair 中的目标
+                targetId = pkPair[Math.floor(Math.random() * pkPair.length)]
+              }
+            } else {
+              // 普通模式校验：不能投自己、不能投已死玩家
+              const valid = targetId !== null && targetId !== p.id && alive.find((pp) => pp.id === targetId)
+              targetId = valid ? targetId : null
+            }
+            const finalTarget = targetId
             const target = finalTarget !== null ? get().players.find((pp) => pp.id === finalTarget) : null
             const vote: VoteRecord = { voterId: p.id, voterName: p.name, targetId: finalTarget, targetName: target ? target.name : null }
             set((s) => ({ votes: [...s.votes, vote] }))
@@ -1382,6 +1452,39 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
           const tally = tallyVotes(votes.map((v) => ({ voterId: v.voterId, targetId: v.targetId })), sheriffId)
           const winnerId = tally.winnerId
           const tie = tally.tie
+
+          // 公布投票结果（票型墙动画）
+          set({ voteRevealed: true })
+          await delay(1500)  // 留出票型墙展示时间
+
+          // === 平票 PK 流程（仅首轮平票 + 存活>2人时进入PK） ===
+          if (tie && winnerId === null && get().pkRound === 0 && alive.length > 2 && tally.tieCandidates && tally.tieCandidates.length >= 2) {
+            const pkPair = tally.tieCandidates.slice(0, 2)
+            get()._archiveSpeeches(`第${day}天·白天讨论`)
+            get()._addEvent({
+              day, category: 'vote', icon: '⚖️',
+              title: `投票平票，进入PK`,
+              detail: `${pkPair.map((id) => `${id}号`).join(' vs ')} 进行PK发言与投票`,
+            })
+            get().showToast(`⚖️ 平票！${pkPair[0]}号 vs ${pkPair[1]}号 进入PK`, 'info')
+            set({
+              phase: 'day-discuss',
+              speeches: [],
+              currentSpeaker: null,
+              speakStartIdx: null,
+              speakCount: 0,
+              speakTotal: 2,  // PK 只两人发言
+              votes: [],
+              pkPair,
+              pkRound: 1,
+              voteRevealed: false,
+              processing: false,
+              whiteWolfSkillAvailable: true,
+            })
+            await delay(800)
+            get().proceedDayPhase()
+            return
+          }
 
           get().addLog({
             type: 'vote', day, phase: 'day-result',
@@ -1448,6 +1551,7 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
             phase: 'night-start', day: day + 1,
             speeches: [], votes: [], currentSpeaker: null, speakStartIdx: null, speakCount: 0,
             killedThisNight: [], processing: false, whiteWolfSkillAvailable: false,
+            pkPair: null, pkRound: 0, voteRevealed: false,
           })
           await delay(800)
           get().proceedNightPhase()
