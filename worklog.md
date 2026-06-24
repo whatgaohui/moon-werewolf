@@ -892,3 +892,90 @@ Stage Summary:
 - 投票30s超时+倒计时UI,告别等待
 - 讨论区增大40%+自动滚底,发言全可见
 - 完整游戏循环验证通过,趣味性报告产出优化路线图
+
+---
+Task ID: 23 (白狼王技能按钮+发言历史+事件日志+UI重构)
+Agent: 主代理 (Z.ai Code)
+Task: 修复用户3大反馈: 白狼王白天技能按钮缺失、发言历史过夜丢失、事件记录不可见+UI重构优化
+
+Work Log:
+- 【需求分析】用户反馈3大问题:
+  1. 白狼王白天可发动技能但无按钮(仅在发言轮有)
+  2. 发言记录过夜丢失, 看不到历史发言
+  3. 被放逐/警长当选等关键事件无记录可见
+  4. 整体UI交互需重构优化
+
+- 【数据层重构 types.ts】
+  新增3个类型:
+  - SpeechRound: 发言历史轮次(跨天保留), 含day/phase/label/speeches
+  - GameEvent: 关键事件条目, 含category(death/vote/sheriff/skill/phase/result)/icon/title/detail
+  - WerewolfGameState 新增字段: speechHistory[], events[], whiteWolfSkillAvailable
+
+- 【状态机重构 store.ts】
+  1. _archiveSpeeches(label): 发言归档 helper, 仅在speeches非空时推入speechHistory
+  2. _addEvent(e): 事件流 helper, 追加到events[]
+  3. 所有 speeches:[] 清空点(14处)增加归档调用:
+     - 警长竞选结束→归档"第X天·竞选警长"
+     - 遗言结束→归档"第X天·遗言"
+     - 白天讨论→投票/夜晚→归档"第X天·白天讨论"
+     - 白狼王自爆→归档当前讨论
+  4. whiteWolfSkillAvailable: 进入day-discuss设true, 进入夜晚/投票后仍true(投票前可自爆)
+  5. userSelfDestruct重构: 兼容2种入口
+     - 系统入口(AI触发): whiteWolfSelfDestructPending已设
+     - 用户主动入口: 检测user.role==='white-wolf' && whiteWolfSkillAvailable
+     - 清除投票计时器+归档发言+添加事件
+  6. AI白狼王主动自爆(day-discuss起始, day>=2):
+     - 启发式评估避免额外LLM调用(429友好)
+     - 难度分档: hard 18% / normal 12% / easy 8% 基础概率
+     - 劣势时概率×1.5(狼数<=神职暴露数+1)
+     - 目标优先级: 已暴露神职(预言家>女巫>守卫>猎人)>随机好人
+  7. 事件记录覆盖6类场景:
+     - phase: 夜降临/天亮/平安夜
+     - death: 夜间死亡/被白狼王带走/被猎人射杀
+     - sheriff: 当选(含票数)/无人上警/平票/移交/撕毁
+     - vote: 被放逐/平票/弃票
+     - skill: 白狼王自爆/猎人开枪
+     - result: 胜负
+
+- 【UI层重构 InfoPanel.tsx (新建组件)】
+  多Tab信息面板(替换原单一日志Sheet):
+  - Tab1 "💬 讨论": 当前轮发言 + 历史轮次(可折叠, SpeechRound列表)
+  - Tab2 "🔔 事件": 事件流(倒序最新在上, 按category着色)
+  - Tab3 "📋 日志": 完整游戏日志(原GameLog)
+  - 每个Tab显示数量徽章
+  - 历史轮次使用Collapsible组件, 展开/折叠带动画
+
+- 【UI层重构 GameScreen.tsx】
+  1. 顶部header新增白狼王常驻技能按钮:
+     - 条件: user.role==='white-wolf' && isAlive && whiteWolfSkillAvailable
+     - 阶段: day-discuss || day-vote (不仅限发言轮)
+     - 样式: 脉冲红色渐变按钮, spring入场动画
+  2. userAction逻辑调整: selfDestructMode优先于speak(发言轮也可切自爆)
+  3. 自爆操作面板: 取消+确认双按钮, 目标提示"点击上方头像"
+  4. 发言面板简化: 移除内联自爆按钮(已被常驻按钮替代), 保留提示"也可点顶部自爆"
+  5. 讨论区新增快捷入口:
+     - "历史N轮"按钮(紫色)→打开InfoPanel
+     - 事件计数按钮(红色)→打开InfoPanel
+  6. 空讨论时显示历史提示卡片:"有N轮历史发言 [查看历史]"
+  7. 信息面板按钮新增红点提示(有事件/历史时)
+
+- 【端到端验证 agent-browser 12人白狼王局】
+  完整流程: 选白狼王→夜杀0号→警长竞选(5号当选,6票)→白天讨论→测试自爆
+  验证结果:
+  ✓ 白狼王常驻自爆按钮: 顶部header可见, day-discuss阶段可点击
+  ✓ 自爆模式: 点击后显示"选择要带走的玩家", 取消/确认按钮正常
+  ✓ 实际自爆: 选5号(警长)→确认→8号和5号死亡→警徽移交6号→进入第2夜
+  ✓ 事件记录(9条): 自爆/带走/警徽移交/夜降临/天亮/放逐 全部记录
+  ✓ 发言历史: 第1天·竞选警长(3条)+第1天·白天讨论(2条) 可折叠查看
+  ✓ 多Tab面板: 讨论9/事件9/日志 三Tab切换正常
+  ✓ 讨论区快捷入口: 历史N轮+事件计数 可点击打开面板
+  ✓ 0 控制台错误, 0 运行时错误
+  ✓ lint通过, 编译成功
+
+Stage Summary:
+- 白狼王白天技能: 常驻按钮(header), 讨论轮+投票轮均可主动发动, 不再限于自己发言时
+- AI白狼王: day>=2启发式评估主动自爆(难度分档概率, 劣势加权, 优先打神职)
+- 发言历史: 跨天保留, 14个清空点全部归档, InfoPanel可折叠查看所有历史轮次
+- 事件日志: 6类事件(phase/death/sheriff/vote/skill/result)全程记录, 独立Tab按倒序展示
+- UI重构: 单一日志Sheet→三Tab信息面板(讨论/事件/日志), 讨论区快捷入口, 历史提示卡片
+- 其他职业: 猎人开枪(死亡触发,已有)+白狼王自爆(白天主动,新增) 覆盖所有白天技能需求

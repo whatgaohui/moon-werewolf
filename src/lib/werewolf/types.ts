@@ -135,6 +135,27 @@ export interface Speech {
   isUser: boolean
 }
 
+// 发言历史轮次（跨天/跨阶段保留，供玩家回看）
+export interface SpeechRound {
+  id: string
+  day: number
+  phase: GamePhase
+  label: string  // 如 "第1天·竞选警长"、"第1天·白天讨论"、"第2天·遗言"
+  speeches: Speech[]
+  timestamp: number
+}
+
+// 事件日志条目（关键事件流，独立于完整 log，用于事件面板）
+export interface GameEvent {
+  id: string
+  day: number
+  category: 'death' | 'vote' | 'sheriff' | 'skill' | 'phase' | 'result'
+  icon: string   // emoji
+  title: string  // 简短标题
+  detail?: string // 详情
+  timestamp: number
+}
+
 // 投票记录
 export interface VoteRecord {
   voterId: number
@@ -154,6 +175,8 @@ export interface WerewolfGameState {
   log: LogEntry[]
   nightAction: NightAction | null
   speeches: Speech[]
+  speechHistory: SpeechRound[]  // 历史发言轮次（跨天保留，供回看）
+  events: GameEvent[]           // 关键事件流（死亡/投票/警长/技能）
   votes: VoteRecord[]
   currentSpeaker: number | null  // 当前发言玩家id
   speakStartIdx: number | null   // 本轮发言起始索引
@@ -180,6 +203,7 @@ export interface WerewolfGameState {
   _aiSheriffCollected: boolean       // AI上警决定已收集
   // 白狼王自爆相关
   whiteWolfSelfDestructPending: number | null // 待自爆的白狼王id
+  whiteWolfSkillAvailable: boolean  // 白狼王白天技能是否可用（白天讨论/投票阶段可主动发动）
   // 弹窗/提示状态
   seerResultPending: { targetId: number; targetName: string; result: 'wolf' | 'good' } | null
   toast: { id: string; content: string; type: 'info' | 'success' | 'danger' } | null

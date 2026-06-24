@@ -5,6 +5,7 @@ import { Player, GamePhase } from '@/lib/werewolf/types'
 import { ROLES, isWolf } from '@/lib/werewolf/roles'
 import { PlayerAvatar } from './PlayerAvatar'
 import { GameLog } from './GameLog'
+import { InfoPanel } from './InfoPanel'
 import { VoiceInput } from './VoiceInput'
 import { SeerResultDialog } from './SeerResultDialog'
 import { ToastTip } from './ToastTip'
@@ -16,7 +17,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/co
 import { useMemo, useState, useEffect, useRef } from 'react'
 import {
   Moon, Sun, Skull, ScrollText, Send, SkipForward, Check, X,
-  Shield, Crosshair, Eye, FlaskConical, Target, Loader2, ChevronUp, Bomb, Crown,
+  Shield, Crosshair, Eye, FlaskConical, Target, Loader2, ChevronUp, Bomb, Crown, History, Bell,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { cn } from '@/lib/utils'
@@ -73,8 +74,9 @@ export function GameScreen() {
   const state = useWerewolfStore()
   const {
     players, userPlayerId, phase, day, log, nightAction,
-    speeches, votes, currentSpeaker, processing, speaking, winner,
+    speeches, speechHistory, events, votes, currentSpeaker, processing, speaking, winner,
     witchAntidoteUsed, witchPoisonUsed, lastGuardTarget, voteDeadline,
+    whiteWolfSkillAvailable,
   } = state
 
   const user = players.find((p) => p.id === userPlayerId)
@@ -140,9 +142,9 @@ export function GameScreen() {
       if (!voted) return 'sheriff-vote'
     }
     if (phase === 'day-lastwords' && state.lastWordsPending[0] === userPlayerId) return 'lastwords'
+    // 白狼王自爆模式优先（用户主动触发后，即使在发言轮也可自爆）
+    if (selfDestructMode && user.role === 'white-wolf' && (phase === 'day-discuss' || phase === 'day-vote') && whiteWolfSkillAvailable) return 'self-destruct'
     if (phase === 'day-discuss' && currentSpeaker === user.id) return 'speak'
-    // 白狼王自爆模式（用户主动触发）
-    if (selfDestructMode && user.role === 'white-wolf' && phase === 'day-discuss') return 'self-destruct'
     // 系统进入白狼王自爆阶段（AI 触发后等待用户响应不会发生，但保留分支）
     if (phase === 'day-self-destruct' && state.whiteWolfSelfDestructPending === user.id) return 'self-destruct'
     if (phase === 'day-vote') return 'vote'
@@ -150,7 +152,7 @@ export function GameScreen() {
     // 警徽移交
     if (phase === 'sheriff-transfer' && state.sheriffTransferPending === user.id) return 'sheriff-transfer'
     return null
-  }, [phase, user, currentSpeaker, state.hunterPending, state.sheriffCandidates, state.sheriffCampaignIdx, state.sheriffVotes, state.lastWordsPending, state.whiteWolfSelfDestructPending, state.sheriffTransferPending, selfDestructMode, userPlayerId])
+  }, [phase, user, currentSpeaker, state.hunterPending, state.sheriffCandidates, state.sheriffCampaignIdx, state.sheriffVotes, state.lastWordsPending, state.whiteWolfSelfDestructPending, state.sheriffTransferPending, selfDestructMode, userPlayerId, whiteWolfSkillAvailable])
 
   // 可选择目标
   const selectableTargets = useMemo((): Player[] => {
@@ -369,22 +371,45 @@ export function GameScreen() {
               <span className="text-xs font-bold text-white/95">{ROLES[user.role].name}</span>
             </div>
 
-            {/* 日志按钮 */}
+            {/* 白狼王白天技能按钮（常驻，讨论/投票阶段可主动发动自爆） */}
+            {user.role === 'white-wolf' && user.isAlive && whiteWolfSkillAvailable && !selfDestructMode &&
+              (phase === 'day-discuss' || phase === 'day-vote') && (
+              <motion.div
+                initial={{ scale: 0, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+              >
+                <Button
+                  onClick={() => setSelfDestructMode(true)}
+                  disabled={processing}
+                  size="sm"
+                  className="h-8 rounded-full bg-gradient-to-r from-rose-600 to-red-800 text-white font-bold shadow-lg shadow-rose-900/40 animate-pulse"
+                >
+                  <Bomb className="w-3.5 h-3.5 mr-1" />
+                  自爆
+                </Button>
+              </motion.div>
+            )}
+
+            {/* 信息面板按钮（讨论/事件/日志 三合一） */}
             <Sheet open={showLog} onOpenChange={setShowLog}>
               <SheetTrigger asChild>
-                <Button variant="ghost" size="icon" className="rounded-full glass-card text-amber-100 hover:bg-amber-200/10">
+                <Button variant="ghost" size="icon" className="rounded-full glass-card text-amber-100 hover:bg-amber-200/10 relative">
                   <ScrollText className="w-5 h-5" />
+                  {(events.length > 0 || speechHistory.length > 0) && (
+                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-rose-400 animate-pulse" />
+                  )}
                 </Button>
               </SheetTrigger>
-              <SheetContent side="right" className="w-[85%] sm:w-[400px] glass-card-strong border-amber-200/15 p-0">
+              <SheetContent side="right" className="w-[88%] sm:w-[420px] glass-card-strong border-amber-200/15 p-0">
                 <SheetHeader className="px-4 py-3 border-b border-amber-200/10">
                   <SheetTitle className="flex items-center gap-2 text-amber-100">
                     <ScrollText className="w-4 h-4" />
-                    游戏日志
+                    信息面板
                   </SheetTitle>
                 </SheetHeader>
                 <div className="h-[calc(100%-3.5rem)]">
-                  <GameLog logs={log} />
+                  <InfoPanel />
                 </div>
               </SheetContent>
             </Sheet>
@@ -451,7 +476,29 @@ export function GameScreen() {
                   <ScrollText className="w-3 h-3" />
                   {phase === 'day-lastwords' ? '遗言' : phase.startsWith('day-sheriff') ? '竞选发言' : '讨论记录'}
                 </span>
-                <span className="text-[10px] text-amber-100/40">{speeches.length}条</span>
+                <div className="flex items-center gap-1.5">
+                  {/* 历史发言快捷入口 */}
+                  {speechHistory.length > 0 && (
+                    <button
+                      onClick={() => setShowLog(true)}
+                      className="flex items-center gap-1 text-[10px] text-violet-300 hover:text-violet-200 transition-colors px-1.5 py-0.5 rounded-md hover:bg-violet-400/10"
+                    >
+                      <History className="w-3 h-3" />
+                      历史{speechHistory.length}轮
+                    </button>
+                  )}
+                  {/* 事件快捷入口 */}
+                  {events.length > 0 && (
+                    <button
+                      onClick={() => setShowLog(true)}
+                      className="flex items-center gap-1 text-[10px] text-rose-300 hover:text-rose-200 transition-colors px-1.5 py-0.5 rounded-md hover:bg-rose-400/10"
+                    >
+                      <Bell className="w-3 h-3" />
+                      {events.length}
+                    </button>
+                  )}
+                  <span className="text-[10px] text-amber-100/40">{speeches.length}条</span>
+                </div>
               </div>
               <ScrollArea className="h-56 scrollbar-thin">
                 <div className="space-y-1.5 px-1">
@@ -477,7 +524,7 @@ export function GameScreen() {
                           <div className="text-[10px] text-amber-200/60 mb-0.5">
                             {s.playerName} · {s.playerId}号
                           </div>
-                          <div className="leading-relaxed">{s.content}</div>
+                          <div className="leading-relaxed whitespace-pre-wrap break-words">{s.content}</div>
                         </div>
                       </motion.div>
                     )
@@ -485,6 +532,25 @@ export function GameScreen() {
                   <div ref={speechEndRef} />
                 </div>
               </ScrollArea>
+            </div>
+          )}
+
+          {/* 空讨论时显示历史提示（白天阶段且无当前发言） */}
+          {(phase === 'day-discuss' || phase === 'day-vote' || phase === 'day-announce') && speeches.length === 0 && speechHistory.length > 0 && (
+            <div className="mt-3 glass-card rounded-2xl p-3 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs text-amber-100/60">
+                <History className="w-3.5 h-3.5 text-violet-300" />
+                <span>有 {speechHistory.length} 轮历史发言</span>
+              </div>
+              <Button
+                onClick={() => setShowLog(true)}
+                variant="ghost"
+                size="sm"
+                className="h-7 text-xs text-violet-300 hover:text-violet-200 hover:bg-violet-400/10"
+              >
+                查看历史
+                <ChevronUp className="w-3 h-3 ml-0.5" />
+              </Button>
             </div>
           )}
 
@@ -878,90 +944,52 @@ export function GameScreen() {
                     <span className="text-base">🗣️</span>
                   </div>
                   <div className="text-sm font-bold text-amber-100">轮到你发言了</div>
-                  {/* 白狼王自爆按钮 (v2.0 §8.8) */}
-                  {user.role === 'white-wolf' && !selfDestructMode && (
-                    <Button
-                      onClick={() => setSelfDestructMode(true)}
-                      disabled={processing}
-                      size="sm"
-                      className="ml-auto h-8 rounded-lg bg-gradient-to-r from-rose-600 to-red-800 text-white font-bold animate-pulse"
-                    >
-                      <Bomb className="w-3.5 h-3.5 mr-1" />
-                      自爆
-                    </Button>
+                  {user.role === 'white-wolf' && whiteWolfSkillAvailable && (
+                    <span className="ml-auto text-[10px] text-rose-300/70">💡 也可点顶部"自爆"</span>
                   )}
                 </div>
-                {selfDestructMode && user.role === 'white-wolf' ? (
-                  <div className="glass-card rounded-xl p-2.5 border border-rose-400/40">
-                    <div className="text-xs text-rose-200 mb-2 flex items-center gap-1">
-                      <Bomb className="w-3.5 h-3.5" />
-                      白狼王自爆将带走一名玩家并立即进入黑夜，你本人无遗言。请选择目标：
-                    </div>
-                    <div className="flex gap-2">
-                      <Button
-                        onClick={() => setSelfDestructMode(false)}
-                        variant="outline"
-                        disabled={processing}
-                        className="flex-1 h-10 rounded-lg glass-card"
-                      >
-                        <X className="w-3.5 h-3.5 mr-1" />取消
-                      </Button>
-                      <Button
-                        onClick={handleConfirm}
-                        disabled={!canConfirm || processing}
-                        className="flex-1 h-10 rounded-lg bg-gradient-to-r from-rose-600 to-red-800 text-white font-bold disabled:opacity-40"
-                      >
-                        <Bomb className="w-3.5 h-3.5 mr-1" />
-                        确认自爆
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div className="flex gap-2 items-end">
-                      <VoiceInput
-                        onTranscript={(t) => setSpeakText((cur) => (cur ? cur + ' ' : '') + t)}
-                        disabled={processing}
-                      />
-                      <Textarea
-                        value={speakText}
-                        onChange={(e) => setSpeakText(e.target.value)}
-                        placeholder="输入你的发言，或点击麦克风语音..."
-                        className="flex-1 min-h-[44px] max-h-24 resize-none glass-card border-amber-300/20 text-amber-100 placeholder:text-amber-100/40"
-                        rows={1}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault()
-                            handleSpeak()
-                          }
-                        }}
-                      />
-                      <Button
-                        onClick={handleSpeak}
-                        disabled={!speakText.trim() || processing}
-                        size="icon"
-                        className="h-11 w-11 rounded-full bg-gradient-to-r from-amber-400 to-orange-500 text-amber-950 disabled:opacity-40"
-                      >
-                        <Send className="w-4 h-4" />
-                      </Button>
-                    </div>
-                    <Button
-                      onClick={() => state.skipSpeak()}
-                      variant="ghost"
-                      size="sm"
-                      disabled={processing}
-                      className="w-full h-8 text-xs text-amber-100/50"
-                    >
-                      <SkipForward className="w-3 h-3 mr-1" />
-                      跳过发言
-                    </Button>
-                  </>
-                )}
+                <div className="flex gap-2 items-end">
+                  <VoiceInput
+                    onTranscript={(t) => setSpeakText((cur) => (cur ? cur + ' ' : '') + t)}
+                    disabled={processing}
+                  />
+                  <Textarea
+                    value={speakText}
+                    onChange={(e) => setSpeakText(e.target.value)}
+                    placeholder="输入你的发言，或点击麦克风语音..."
+                    className="flex-1 min-h-[44px] max-h-24 resize-none glass-card border-amber-300/20 text-amber-100 placeholder:text-amber-100/40"
+                    rows={1}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault()
+                        handleSpeak()
+                      }
+                    }}
+                  />
+                  <Button
+                    onClick={handleSpeak}
+                    disabled={!speakText.trim() || processing}
+                    size="icon"
+                    className="h-11 w-11 rounded-full bg-gradient-to-r from-amber-400 to-orange-500 text-amber-950 disabled:opacity-40"
+                  >
+                    <Send className="w-4 h-4" />
+                  </Button>
+                </div>
+                <Button
+                  onClick={() => state.skipSpeak()}
+                  variant="ghost"
+                  size="sm"
+                  disabled={processing}
+                  className="w-full h-8 text-xs text-amber-100/50"
+                >
+                  <SkipForward className="w-3 h-3 mr-1" />
+                  跳过发言
+                </Button>
               </motion.div>
             )}
 
-            {/* 白狼王自爆（独立阶段，AI 触发或用户主动触发后） */}
-            {userAction === 'self-destruct' && phase === 'day-self-destruct' && (
+            {/* 白狼王自爆（用户主动触发或系统阶段，讨论/投票/自爆阶段均可） */}
+            {userAction === 'self-destruct' && (
               <motion.div
                 key="self-destruct-phase"
                 initial={{ opacity: 0, y: 10 }}
@@ -973,22 +1001,31 @@ export function GameScreen() {
                   <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-rose-600 to-red-800 flex items-center justify-center animate-pulse">
                     <Bomb className="w-4 h-4 text-white" />
                   </div>
-                  <div>
+                  <div className="flex-1">
                     <div className="text-sm font-bold text-rose-200">💥 白狼王自爆</div>
                     <div className="text-[10px] text-amber-100/60">
-                      {selectedTarget !== null ? `将带走 ${selectedTarget}号，立即进入黑夜` : '选择要带走的玩家'}
+                      {selectedTarget !== null ? `将带走 ${selectedTarget}号，立即进入黑夜` : '选择要带走的玩家（点击上方头像）'}
                     </div>
                   </div>
                 </div>
-                <Button
-                  onClick={handleConfirm}
-                  disabled={!canConfirm || processing}
-                  size="lg"
-                  className="w-full h-12 rounded-xl bg-gradient-to-r from-rose-600 to-red-800 text-white font-bold disabled:opacity-40 active:scale-95 transition-all"
-                >
-                  <Bomb className="w-4 h-4 mr-1" />
-                  确认自爆
-                </Button>
+                <div className="flex gap-2">
+                  <Button
+                    onClick={() => { setSelfDestructMode(false); setSelectedTarget(null) }}
+                    variant="outline"
+                    disabled={processing}
+                    className="flex-1 h-11 rounded-xl glass-card"
+                  >
+                    <X className="w-4 h-4 mr-1" />取消
+                  </Button>
+                  <Button
+                    onClick={handleConfirm}
+                    disabled={!canConfirm || processing}
+                    className="flex-1 h-11 rounded-xl bg-gradient-to-r from-rose-600 to-red-800 text-white font-bold disabled:opacity-40 active:scale-95 transition-all"
+                  >
+                    <Bomb className="w-4 h-4 mr-1" />
+                    确认自爆
+                  </Button>
+                </div>
               </motion.div>
             )}
 
