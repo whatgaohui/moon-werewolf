@@ -1,5 +1,5 @@
-import { Player, GameConfig, Faction, NightAction, RoleId } from './types'
-import { ROLES, isWolf, AI_NAMES, AI_AVATARS } from './roles'
+import { Player, GameConfig, Faction, NightAction, RoleId, DeathCause } from './types'
+import { ROLES, isWolf, GOD_ROLES, AI_NAMES, AI_AVATARS } from './roles'
 
 // 洗牌
 export function shuffle<T>(arr: T[]): T[] {
@@ -21,16 +21,12 @@ export function initPlayers(config: GameConfig, preferredRole: string = 'random'
   let roles = config.roles
 
   if (preferredRole === 'random') {
-    // 完全随机：洗牌角色，用户拿任意一个
     roles = shuffle(config.roles)
   } else if (preferredRole === 'wolf') {
-    // 偏好狼人阵营：把狼人角色优先放到用户位置
     const wolfRoles = config.roles.filter((r) => isWolf(r as RoleId))
     const otherRoles = config.roles.filter((r) => !isWolf(r as RoleId))
-    // 随机选一个狼人角色给用户
     const userWolf = shuffle(wolfRoles)[0]
     const remainingWolves = wolfRoles.filter((_, i) => i !== wolfRoles.indexOf(userWolf))
-    // 重新组合并洗牌剩余位置
     const remaining = shuffle([...remainingWolves, ...otherRoles])
     roles = []
     for (let i = 0; i < config.playerCount; i++) {
@@ -41,7 +37,6 @@ export function initPlayers(config: GameConfig, preferredRole: string = 'random'
       }
     }
   } else if (preferredRole === 'good') {
-    // 偏好好人阵营
     const goodRoles = config.roles.filter((r) => !isWolf(r as RoleId))
     const wolfRoles = config.roles.filter((r) => isWolf(r as RoleId))
     const userGood = shuffle(goodRoles)[0]
@@ -56,13 +51,11 @@ export function initPlayers(config: GameConfig, preferredRole: string = 'random'
       }
     }
   } else {
-    // 指定具体角色（如 'seer'）
     const targetRole = preferredRole as RoleId
     const hasRole = config.roles.includes(targetRole)
     if (hasRole) {
       const sameRoles = config.roles.filter((r) => r === targetRole)
       const otherRoles = config.roles.filter((r) => r !== targetRole)
-      // 取一个目标角色给用户
       const remaining = shuffle([...sameRoles.slice(1), ...otherRoles])
       roles = []
       for (let i = 0; i < config.playerCount; i++) {
@@ -73,7 +66,6 @@ export function initPlayers(config: GameConfig, preferredRole: string = 'random'
         }
       }
     } else {
-      // 该配置没有此角色，回退随机
       roles = shuffle(config.roles)
     }
   }
@@ -85,7 +77,24 @@ export function initPlayers(config: GameConfig, preferredRole: string = 'random'
     role: role as RoleId,
     isAlive: true,
     isUser: i === userIndex,
+    // 初始化 AI 配置：信任度全员 50（v2.0 §9.1）
+    aiConfig: i === userIndex ? undefined : {
+      difficulty: config.difficulty,
+      trustScores: {},
+    },
   }))
+
+  // 初始化 AI 信任度（对其他玩家默认 50）
+  for (const p of players) {
+    if (p.aiConfig) {
+      for (const other of players) {
+        if (other.id !== p.id) {
+          p.aiConfig.trustScores[other.id] = 50
+        }
+      }
+    }
+  }
+
   return players
 }
 
@@ -109,55 +118,130 @@ export function aliveWolves(players: Player[]): Player[] {
   return players.filter((p) => p.isAlive && isWolf(p.role))
 }
 
-// 胜负判定
-export function checkWinner(players: Player[]): Faction | null {
+// 获取存活平民
+export function aliveVillagers(players: Player[]): Player[] {
+  return players.filter((p) => p.isAlive && p.role === 'villager')
+}
+
+// 获取存活神职
+export function aliveGods(players: Player[]): Player[] {
+  return players.filter((p) => p.isAlive && GOD_ROLES.includes(p.role))
+}
+
+// 胜负判定 (v2.0 §3.3 - 屠边规则)
+// 返回 { faction, cause } 或 null
+export function checkWinner(
+  players: Player[],
+  ruleSet: 'tu-bian' | 'tu-cheng' = 'tu-bian',
+): { faction: Faction; cause: string } | null {
   const wolves = aliveWolves(players)
-  const goods = players.filter((p) => p.isAlive && ROLES[p.role].faction === 'good')
-  if (wolves.length === 0) return 'good'
-  if (wolves.length >= goods.length) return 'wolf'
+  const villagers = aliveVillagers(players)
+  const gods = aliveGods(players)
+
+  // 1. 狼人全死 → 好人胜
+  if (wolves.length === 0) {
+    return { faction: 'good', cause: '屠狼成功：所有狼人已死亡' }
+  }
+
+  // 2. 屠边：平民全死 OR 神职全死 → 狼人胜
+  if (ruleSet === 'tu-bian') {
+    if (villagers.length === 0) {
+      return { faction: 'wolf', cause: '屠民成功：所有平民已死亡' }
+    }
+    if (gods.length === 0) {
+      return { faction: 'wolf', cause: '屠神成功：所有神职已死亡' }
+    }
+  } else {
+    // 屠城：好人全死 → 狼人胜
+    if (villagers.length === 0 && gods.length === 0) {
+      return { faction: 'wolf', cause: '屠城成功：所有好人已死亡' }
+    }
+  }
+
   return null
 }
 
-// 结算夜晚行动
+// 猎人能否开枪 (v2.0 §8.5)
+// 被狼刀/被投票放逐 → 可开枪
+// 被女巫毒/被白狼王自爆带走 → 不能开枪
+export function canHunterShoot(player: Player): boolean {
+  if (player.role !== 'hunter') return false
+  if (player.isAlive) return false
+  if (player.deathCause === 'witch-poison') return false
+  if (player.deathCause === 'white-wolf-bomb') return false
+  if (player.deathCause === 'hunter-shot') return false // 二级死亡不再触发
+  return true
+}
+
+// 玩家是否有遗言权 (v2.0 §7.1)
+// 第一晚死亡 → 有遗言
+// 白天被放逐 → 有遗言
+// 被毒/被枪击 → 无遗言
+// 后续夜晚死亡 → 无遗言
+export function hasLastWords(player: Player, day: number, isNightDeath: boolean): boolean {
+  if (!player.deathCause) return false
+  if (player.deathCause === 'witch-poison') return false
+  if (player.deathCause === 'hunter-shot') return false
+  if (player.deathCause === 'white-wolf-bomb') return false
+  if (player.deathCause === 'self-destruct') return false // 白狼王自爆无遗言
+  if (isNightDeath) {
+    // 夜间死亡：仅第一夜有遗言
+    return day === 1
+  }
+  // 白天被放逐 → 有遗言
+  return player.deathCause === 'voted-out'
+}
+
+// 结算夜晚行动 (v2.0 §6.2 严格按效果计算)
+// 行动顺序：狼刀 → 守卫 → 女巫救/毒 → 预言家查验（无死亡效果）
+// 同守同救 = 死亡
 export function resolveNight(
   players: Player[],
   action: NightAction,
   lastGuardTarget: number | null,
+  sameGuardSaveDeath: boolean = true,
 ): { deaths: number[]; players: Player[]; newLastGuard: number | null } {
-  const updated = players.map((p) => ({ ...p, protected: false, saved: false, poisoned: false }))
+  const updated = players.map((p) => ({
+    ...p,
+    protected: false,
+    saved: false,
+    poisoned: false,
+  }))
   const deaths = new Set<number>()
 
-  // 守卫守护
-  if (action.guardTarget !== undefined) {
+  // 1. 守卫守护
+  if (action.guardTarget !== undefined && action.guardTarget !== null) {
     const g = updated.find((p) => p.id === action.guardTarget)
     if (g && g.isAlive) g.protected = true
   }
 
-  // 狼人击杀
-  if (action.wolfTarget !== undefined) {
+  // 2. 狼人击杀
+  if (action.wolfTarget !== undefined && action.wolfTarget !== null) {
     const t = updated.find((p) => p.id === action.wolfTarget)
     if (t && t.isAlive) {
-      // 同守同救 = 死亡 (空刀情况)
       const savedByWitch = action.witchSave === true
-      if (t.protected && savedByWitch) {
-        // 同守同救，死亡
+      // 同守同救 = 死亡
+      if (t.protected && savedByWitch && sameGuardSaveDeath) {
         deaths.add(t.id)
-        t.deathReason = '被狼人杀害（同守同救）'
+        t.deathCause = 'guard-save-conflict'
+        t.deathReason = '同守同救死亡'
       } else if (t.protected || savedByWitch) {
         // 被守护或被救，存活
       } else {
         deaths.add(t.id)
+        t.deathCause = 'wolf-kill'
         t.deathReason = '被狼人杀害'
       }
     }
   }
 
-  // 女巫毒杀
-  if (action.witchPoisonTarget !== undefined) {
+  // 3. 女巫毒杀
+  if (action.witchPoisonTarget !== undefined && action.witchPoisonTarget !== null) {
     const t = updated.find((p) => p.id === action.witchPoisonTarget)
     if (t && t.isAlive) {
       deaths.add(t.id)
       t.poisoned = true
+      t.deathCause = 'witch-poison'
       t.deathReason = '被女巫毒杀'
     }
   }
@@ -180,11 +264,14 @@ export function resolveNight(
 // 统计投票
 export function tallyVotes(
   votes: { voterId: number; targetId: number | null }[],
+  sheriffId: number | null = null,
 ): { winnerId: number | null; tie: boolean; counts: Record<number, number> } {
   const counts: Record<number, number> = {}
   for (const v of votes) {
     if (v.targetId !== null) {
-      counts[v.targetId] = (counts[v.targetId] || 0) + 1
+      // 警长票计 1.5 票 (v2.0 §7.4)
+      const weight = v.voterId === sheriffId ? 1.5 : 1
+      counts[v.targetId] = (counts[v.targetId] || 0) + weight
     }
   }
   const entries = Object.entries(counts).map(([id, c]) => ({ id: Number(id), count: c }))
@@ -205,4 +292,64 @@ export function logId(): string {
 export function randomPick<T>(arr: T[]): T | undefined {
   if (arr.length === 0) return undefined
   return arr[Math.floor(Math.random() * arr.length)]
+}
+
+// ============ AI 视角隔离的工具函数 (v2.0 §1.1.2) ============
+
+// 构建给 AI 的"公开信息"玩家视图：只包含公开可见的字段，绝不含 role
+export interface PublicPlayerInfo {
+  id: number
+  name: string
+  avatar: string
+  alive: boolean
+  isUser: boolean
+  deathDay?: number
+  deathReason?: string // 公开的死因文案（如"被狼人杀害"）
+  isSheriff?: boolean
+}
+
+export function buildPublicPlayerInfo(
+  players: Player[],
+  sheriffId: number | null,
+  hideRoles: boolean = true,
+): PublicPlayerInfo[] {
+  return players.map((p) => ({
+    id: p.id,
+    name: p.name,
+    avatar: p.avatar,
+    alive: p.isAlive,
+    isUser: p.isUser,
+    deathDay: p.deathDay,
+    deathReason: p.deathReason,
+    isSheriff: p.id === sheriffId,
+    // 注意：role 字段绝对不暴露给 AI（v2.0 §1.1.2 视角隔离）
+  }))
+}
+
+// 构建狼人 AI 的可见信息：公开信息 + 自己的狼人同伴
+export function buildWolfView(
+  players: Player[],
+  viewerId: number,
+  sheriffId: number | null,
+): { teammates: PublicPlayerInfo[]; publicInfo: PublicPlayerInfo[] } {
+  const publicInfo = buildPublicPlayerInfo(players, sheriffId)
+  const me = players.find((p) => p.id === viewerId)
+  const teammates: PublicPlayerInfo[] = []
+  if (me && isWolf(me.role)) {
+    for (const p of players) {
+      if (p.id !== viewerId && isWolf(p.role)) {
+        teammates.push({
+          id: p.id,
+          name: p.name,
+          avatar: p.avatar,
+          alive: p.isAlive,
+          isUser: p.isUser,
+          deathDay: p.deathDay,
+          deathReason: p.deathReason,
+          isSheriff: p.id === sheriffId,
+        })
+      }
+    }
+  }
+  return { teammates, publicInfo }
 }

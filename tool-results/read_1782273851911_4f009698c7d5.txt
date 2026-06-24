@@ -1,0 +1,1353 @@
+     1→     1→import { create } from 'zustand'
+     2→     2→import {
+     3→     3→  WerewolfGameState,
+     4→     4→  GameConfig,
+     5→     5→  Player,
+     6→     6→  GamePhase,
+     7→     7→  LogEntry,
+     8→     8→  NightAction,
+     9→     9→  Speech,
+    10→    10→  VoteRecord,
+    11→    11→  RoleId,
+    12→    12→} from './types'
+    13→    13→import { ROLES, isWolf } from './roles'
+    14→    14→import {
+    15→    15→  initPlayers,
+    16→    16→  alivePlayers,
+    17→    17→  aliveWolves,
+    18→    18→  checkWinner,
+    19→    19→  resolveNight,
+    20→    20→  tallyVotes,
+    21→    21→  logId,
+    22→    22→  shuffle,
+    23→    23→  randomPick,
+    24→    24→} from './engine'
+    25→    25→import { countRoles } from './configs'
+    26→    26→import { play as playSfx } from './sfx'
+    27→    27→import { recordGame } from './stats'
+    28→    28→
+    29→    29→interface WerewolfStore extends WerewolfGameState {
+    30→    30→  // 视图导航
+    31→    31→  goToSetup: () => void
+    32→    32→  goToMenu: () => void
+    33→    33→  startGame: (config: GameConfig, preferredRole?: string) => void
+    34→    34→  confirmRoleReveal: () => void
+    35→    35→  restart: () => void
+    36→    36→
+    37→    37→  // 日志
+    38→    38→  addLog: (entry: Omit<LogEntry, 'id' | 'timestamp'>) => void
+    39→    39→  showToast: (content: string, type?: 'info' | 'success' | 'danger') => void
+    40→    40→  clearToast: () => void
+    41→    41→  confirmSeerResult: () => void
+    42→    42→
+    43→    43→  // 夜晚行动（用户）
+    44→    44→  userNightAction: (action: Partial<NightAction>) => Promise<void>
+    45→    45→
+    46→    46→  // 白天发言（用户）
+    47→    47→  userSpeak: (content: string) => Promise<void>
+    48→    48→  skipSpeak: () => Promise<void>
+    49→    49→
+    50→    50→  // 投票（用户）
+    51→    51→  userVote: (targetId: number | null) => Promise<void>
+    52→    52→
+    53→    53→  // 猎人开枪
+    54→    54→  userHunterShoot: (targetId: number | null) => Promise<void>
+    55→    55→
+    56→    56→  // 警长竞选（用户）
+    57→    57→  userJoinSheriff: (join: boolean) => void
+    58→    58→  userSheriffVote: (targetId: number | null) => Promise<void>
+    59→    59→  userLastWords: (content: string) => void
+    60→    60→  skipLastWords: () => void
+    61→    61→
+    62→    62→  // 推进流程
+    63→    63→  proceedNightPhase: () => Promise<void>
+    64→    64→  proceedDayPhase: () => Promise<void>
+    65→    65→
+    66→    66→  // 内部
+    67→    67→  _setProcessing: (v: boolean) => void
+    68→    68→  _setPhase: (p: GamePhase) => void
+    69→    69→}
+    70→    70→
+    71→    71→const initialState: WerewolfGameState = {
+    72→    72→  view: 'menu',
+    73→    73→  config: null,
+    74→    74→  players: [],
+    75→    75→  userPlayerId: 0,
+    76→    76→  phase: 'role-reveal',
+    77→    77→  day: 0,
+    78→    78→  log: [],
+    79→    79→  nightAction: null,
+    80→    80→  speeches: [],
+    81→    81→  votes: [],
+    82→    82→  currentSpeaker: null,
+    83→    83→  speakStartIdx: null,
+    84→    84→  speakCount: 0,
+    85→    85→  winner: null,
+    86→    86→  witchAntidoteUsed: false,
+    87→    87→  witchPoisonUsed: false,
+    88→    88→  lastGuardTarget: null,
+    89→    89→  hunterPending: null,
+    90→    90→  killedThisNight: [],
+    91→    91→  speaking: false,
+    92→    92→  processing: false,
+    93→    93→  sheriffId: null,
+    94→    94→  sheriffCandidates: [],
+    95→    95→  sheriffVotes: [],
+    96→    96→  sheriffCampaignIdx: 0,
+    97→    97→  lastWordsPending: [],
+    98→    98→  _aiSheriffDecided: false,
+    99→    99→  seerResultPending: null,
+   100→   100→  toast: null,
+   101→   101→}
+   102→   102→
+   103→   103→// 调用AI后端
+   104→   104→async function callAI(body: any): Promise<any> {
+   105→   105→  try {
+   106→   106→    const res = await fetch('/api/werewolf/action', {
+   107→   107→      method: 'POST',
+   108→   108→      headers: { 'Content-Type': 'application/json' },
+   109→   109→      body: JSON.stringify(body),
+   110→   110→    })
+   111→   111→    if (!res.ok) {
+   112→   112→      const txt = await res.text()
+   113→   113→      console.error('AI API error', res.status, txt)
+   114→   114→      return null
+   115→   115→    }
+   116→   116→    return await res.json()
+   117→   117→  } catch (e) {
+   118→   118→    console.error('AI call failed', e)
+   119→   119→    return null
+   120→   120→  }
+   121→   121→}
+   122→   122→
+   123→   123→// 等待
+   124→   124→function delay(ms: number) {
+   125→   125→  return new Promise((r) => setTimeout(r, ms))
+   126→   126→}
+   127→   127→
+   128→   128→// 游戏结束处理（记录战绩+音效）
+   129→   129→function finishGame(winner: 'wolf' | 'good', day: number) {
+   130→   130→  const state = get()
+   131→   131→  const user = state.players.find((p) => p.id === state.userPlayerId)
+   132→   132→  if (user && state.config) {
+   133→   133→    const userWon = ROLES[user.role].faction === winner
+   134→   134→    playSfx(userWon ? 'victory' : 'defeat')
+   135→   135→    // 记录战绩
+   136→   136→    recordGame({
+   137→   137→      configId: state.config.id,
+   138→   138→      configName: state.config.name,
+   139→   139→      playerCount: state.config.playerCount,
+   140→   140→      role: user.role,
+   141→   141→      roleName: ROLES[user.role].name,
+   142→   142→      won: userWon,
+   143→   143→      survived: user.isAlive,
+   144→   144→      day,
+   145→   145→    })
+   146→   146→  }
+   147→   147→  set({ winner, phase: 'game-over', processing: false })
+   148→   148→  setTimeout(() => set({ view: 'result' }), 1200)
+   149→   149→}
+   150→   150→
+   151→   151→export const useWerewolfStore = create<WerewolfStore>((set, get) => ({
+   152→   152→  ...initialState,
+   153→   153→
+   154→   154→  goToSetup: () => set({ view: 'setup' }),
+   155→   155→  goToMenu: () => set({ ...initialState }),
+   156→   156→
+   157→   157→  startGame: (config, preferredRole = 'random') => {
+   158→   158→    const players = initPlayers(config, preferredRole)
+   159→   159→    const user = players.find((p) => p.isUser)!
+   160→   160→    const roleCount = countRoles(config.roles as string[])
+   161→   161→
+   162→   162→    const log: LogEntry[] = [
+   163→   163→      {
+   164→   164→        id: logId(),
+   165→   165→        type: 'system',
+   166→   166→        day: 0,
+   167→   167→        phase: 'role-reveal',
+   168→   168→        content: `游戏开始！本局配置：${config.name}，共${config.playerCount}人。你的身份偏好：${preferredRole === 'random' ? '随机' : preferredRole === 'good' ? '好人阵营' : preferredRole === 'wolf' ? '狼人阵营' : ROLES[preferredRole as RoleId]?.name || preferredRole}`,
+   169→   169→        timestamp: Date.now(),
+   170→   170→      },
+   171→   171→    ]
+   172→   172→
+   173→   173→    set({
+   174→   174→      ...initialState,
+   175→   175→      view: 'role-reveal',
+   176→   176→      config,
+   177→   177→      players,
+   178→   178→      userPlayerId: user.id,
+   179→   179→      phase: 'role-reveal',
+   180→   180→      day: 0,
+   181→   181→      log,
+   182→   182→      winner: null,
+   183→   183→    })
+   184→   184→  },
+   185→   185→
+   186→   186→  confirmRoleReveal: () => {
+   187→   187→    set({ view: 'game', phase: 'night-start', day: 1 })
+   188→   188→    // 自动进入夜晚流程
+   189→   189→    setTimeout(() => {
+   190→   190→      get().proceedNightPhase()
+   191→   191→    }, 600)
+   192→   192→  },
+   193→   193→
+   194→   194→  restart: () => set({ ...initialState, view: 'menu' }),
+   195→   195→
+   196→   196→  addLog: (entry) =>
+   197→   197→    set((s) => ({
+   198→   198→      log: [...s.log, { ...entry, id: logId(), timestamp: Date.now() }],
+   199→   199→    })),
+   200→   200→
+   201→   201→  showToast: (content, type = 'info') => {
+   202→   202→    const id = logId()
+   203→   203→    set({ toast: { id, content, type } })
+   204→   204→    // 3秒后自动清除
+   205→   205→    setTimeout(() => {
+   206→   206→      const cur = get().toast
+   207→   207→      if (cur && cur.id === id) set({ toast: null })
+   208→   208→    }, 3000)
+   209→   209→  },
+   210→   210→
+   211→   211→  clearToast: () => set({ toast: null }),
+   212→   212→
+   213→   213→  confirmSeerResult: () => {
+   214→   214→    // 用户确认查验结果后，推进夜晚流程
+   215→   215→    set({ seerResultPending: null })
+   216→   216→    set({ phase: 'night-witch', processing: false })
+   217→   217→    setTimeout(() => {
+   218→   218→      get().proceedNightPhase()
+   219→   219→    }, 300)
+   220→   220→  },
+   221→   221→
+   222→   222→  _setProcessing: (v) => set({ processing: v }),
+   223→   223→  _setPhase: (p) => set({ phase: p }),
+   224→   224→
+   225→   225→  // ========== 夜晚流程 ==========
+   226→   226→  proceedNightPhase: async () => {
+   227→   227→    const state = get()
+   228→   228→    if (state.processing) return
+   229→   229→    set({ processing: true })
+   230→   230→
+   231→   231→    try {
+   232→   232→      let phase = state.phase
+   233→   233→      const day = state.day
+   234→   234→      const players = state.players
+   235→   235→
+   236→   236→      // 初始化夜晚行动记录
+   237→   237→      if (phase === 'night-start') {
+   238→   238→        get().addLog({
+   239→   239→          type: 'night',
+   240→   240→          day,
+   241→   241→          phase: 'night-start',
+   242→   242→          content: `🌙 第 ${day} 夜降临，天黑请闭眼...`,
+   243→   243→        })
+   244→   244→        playSfx('night')
+   245→   245→        set({
+   246→   246→          nightAction: { day, deaths: [] },
+   247→   247→          killedThisNight: [],
+   248→   248→        })
+   249→   249→        // 清除上轮标记
+   250→   250→        set({
+   251→   251→          players: players.map((p) => ({
+   252→   252→            ...p,
+   253→   253→            protected: false,
+   254→   254→            saved: false,
+   255→   255→            poisoned: false,
+   256→   256→          })),
+   257→   257→        })
+   258→   258→        phase = 'night-guard'
+   259→   259→      }
+   260→   260→
+   261→   261→      // ---- 守卫 ----
+   262→   262→      if (phase === 'night-guard') {
+   263→   263→        const guard = state.players.find((p) => p.isAlive && p.role === 'guard')
+   264→   264→        if (guard) {
+   265→   265→          get().addLog({
+   266→   266→            type: 'night',
+   267→   267→            day,
+   268→   268→            phase: 'night-guard',
+   269→   269→            content: '🛡️ 守卫请睁眼，选择今晚守护的玩家...',
+   270→   270→          })
+   271→   271→          if (guard.isUser) {
+   272→   272→            // 等待用户输入
+   273→   273→            set({ phase: 'night-guard', processing: false })
+   274→   274→            return
+   275→   275→          } else {
+   276→   276→            // AI 守卫决策
+   277→   277→            const aiRes = await callAI({
+   278→   278→              action: 'night-guard',
+   279→   279→              playerId: guard.id,
+   280→   280→              players: get().players.map((p) => ({
+   281→   281→                id: p.id,
+   282→   282→                name: p.name,
+   283→   283→                avatar: p.avatar,
+   284→   284→                alive: p.isAlive,
+   285→   285→                isUser: p.isUser,
+   286→   286→                role: p.role,
+   287→   287→              })),
+   288→   288→              lastGuardTarget: get().lastGuardTarget,
+   289→   289→              day,
+   290→   290→            })
+   291→   291→            const target = aiRes?.targetId ?? randomPick(alivePlayers(get().players).filter((p) => p.id !== guard.id && p.id !== get().lastGuardTarget))?.id
+   292→   292→            set((s) => ({
+   293→   293→              nightAction: { ...(s.nightAction as NightAction), guardTarget: target },
+   294→   294→            }))
+   295→   295→            await delay(500)
+   296→   296→          }
+   297→   297→        }
+   298→   298→        phase = 'night-wolf'
+   299→   299→      }
+   300→   300→
+   301→   301→      // ---- 狼人 ----
+   302→   302→      if (phase === 'night-wolf') {
+   303→   303→        const wolves = aliveWolves(get().players)
+   304→   304→        if (wolves.length > 0) {
+   305→   305→          get().addLog({
+   306→   306→            type: 'night',
+   307→   307→            day,
+   308→   308→            phase: 'night-wolf',
+   309→   309→            content: '🐺 狼人请睁眼，选择今晚击杀的玩家...',
+   310→   310→            secret: true,
+   311→   311→          })
+   312→   312→          const userWolf = wolves.find((w) => w.isUser)
+   313→   313→          if (userWolf) {
+   314→   314→            // 用户是狼人，等待选择
+   315→   315→            set({ phase: 'night-wolf', processing: false })
+   316→   316→            return
+   317→   317→          } else {
+   318→   318→            // AI 狼人决策
+   319→   319→            const targets = alivePlayers(get().players).filter((p) => !isWolf(p.role))
+   320→   320→            const leader = wolves[0]
+   321→   321→            const aiRes = await callAI({
+   322→   322→              action: 'night-wolf',
+   323→   323→              playerId: leader.id,
+   324→   324→              players: get().players.map((p) => ({
+   325→   325→                id: p.id,
+   326→   326→                name: p.name,
+   327→   327→                avatar: p.avatar,
+   328→   328→                alive: p.isAlive,
+   329→   329→                isUser: p.isUser,
+   330→   330→                role: p.role,
+   331→   331→              })),
+   332→   332→              day,
+   333→   333→            })
+   334→   334→            const target = aiRes?.targetId ?? randomPick(targets)?.id
+   335→   335→            set((s) => ({
+   336→   336→              nightAction: { ...(s.nightAction as NightAction), wolfTarget: target },
+   337→   337→            }))
+   338→   338→            await delay(500)
+   339→   339→          }
+   340→   340→        }
+   341→   341→        phase = 'night-seer'
+   342→   342→      }
+   343→   343→
+   344→   344→      // ---- 预言家 ----
+   345→   345→      if (phase === 'night-seer') {
+   346→   346→        const seer = get().players.find((p) => p.isAlive && p.role === 'seer')
+   347→   347→        if (seer) {
+   348→   348→          get().addLog({
+   349→   349→            type: 'night',
+   350→   350→            day,
+   351→   351→            phase: 'night-seer',
+   352→   352→            content: '🔮 预言家请睁眼，选择今晚查验的玩家...',
+   353→   353→            secret: true,
+   354→   354→          })
+   355→   355→          if (seer.isUser) {
+   356→   356→            set({ phase: 'night-seer', processing: false })
+   357→   357→            return
+   358→   358→          } else {
+   359→   359→            const targets = alivePlayers(get().players).filter((p) => p.id !== seer.id)
+   360→   360→            const aiRes = await callAI({
+   361→   361→              action: 'night-seer',
+   362→   362→              playerId: seer.id,
+   363→   363→              players: get().players.map((p) => ({
+   364→   364→                id: p.id,
+   365→   365→                name: p.name,
+   366→   366→                avatar: p.avatar,
+   367→   367→                alive: p.isAlive,
+   368→   368→                isUser: p.isUser,
+   369→   369→                role: p.role,
+   370→   370→              })),
+   371→   371→              day,
+   372→   372→            })
+   373→   373→            const target = aiRes?.targetId ?? randomPick(targets)?.id
+   374→   374→            if (target !== undefined && target !== null) {
+   375→   375→              const targetPlayer = get().players.find((p) => p.id === target)
+   376→   376→              if (targetPlayer) {
+   377→   377→                const result = isWolf(targetPlayer.role) ? 'wolf' : 'good'
+   378→   378→                set((s) => ({
+   379→   379→                  nightAction: {
+   380→   380→                    ...(s.nightAction as NightAction),
+   381→   381→                    seerTarget: target,
+   382→   382→                    seerResult: result,
+   383→   383→                  },
+   384→   384→                }))
+   385→   385→              }
+   386→   386→            }
+   387→   387→            await delay(500)
+   388→   388→          }
+   389→   389→        }
+   390→   390→        phase = 'night-witch'
+   391→   391→      }
+   392→   392→
+   393→   393→      // ---- 女巫 ----
+   394→   394→      if (phase === 'night-witch') {
+   395→   395→        const witch = get().players.find((p) => p.isAlive && p.role === 'witch')
+   396→   396→        if (witch) {
+   397→   397→          get().addLog({
+   398→   398→            type: 'night',
+   399→   399→            day,
+   400→   400→            phase: 'night-witch',
+   401→   401→            content: '🧪 女巫请睁眼...',
+   402→   402→            secret: true,
+   403→   403→          })
+   404→   404→          if (witch.isUser) {
+   405→   405→            set({ phase: 'night-witch', processing: false })
+   406→   406→            return
+   407→   407→          } else {
+   408→   408→            // AI 女巫决策
+   409→   409→            const wolfTarget = get().nightAction?.wolfTarget
+   410→   410→            const canSave = !get().witchAntidoteUsed
+   411→   411→            const canPoison = !get().witchPoisonUsed
+   412→   412→            const aiRes = await callAI({
+   413→   413→              action: 'night-witch',
+   414→   414→              playerId: witch.id,
+   415→   415→              players: get().players.map((p) => ({
+   416→   416→                id: p.id,
+   417→   417→                name: p.name,
+   418→   418→                avatar: p.avatar,
+   419→   419→                alive: p.isAlive,
+   420→   420→                isUser: p.isUser,
+   421→   421→                role: p.role,
+   422→   422→              })),
+   423→   423→              wolfTarget,
+   424→   424→              canSave,
+   425→   425→              canPoison,
+   426→   426→              day,
+   427→   427→            })
+   428→   428→            const witchSave = canSave && aiRes?.save && day === 1 // 简化：AI女巫首夜可救
+   429→   429→            const poisonTarget = canPoison && aiRes?.poisonTarget ? aiRes.poisonTarget : undefined
+   430→   430→            set((s) => ({
+   431→   431→              nightAction: {
+   432→   432→                ...(s.nightAction as NightAction),
+   433→   433→                witchSave,
+   434→   434→                witchPoisonTarget: poisonTarget,
+   435→   435→              },
+   436→   436→            }))
+   437→   437→            await delay(500)
+   438→   438→          }
+   439→   439→        }
+   440→   440→        phase = 'night-end'
+   441→   441→      }
+   442→   442→
+   443→   443→      // ---- 夜晚结算 ----
+   444→   444→      if (phase === 'night-end') {
+   445→   445→        const action = get().nightAction as NightAction
+   446→   446→        const result = resolveNight(get().players, action, get().lastGuardTarget)
+   447→   447→
+   448→   448→        // 标记死亡天数
+   449→   449→        const finalPlayers = result.players.map((p) => {
+   450→   450→          if (!p.isAlive && p.deathDay === undefined && result.deaths.includes(p.id)) {
+   451→   451→            return { ...p, deathDay: day }
+   452→   452→          }
+   453→   453→          return p
+   454→   454→        })
+   455→   455→
+   456→   456→        // 更新药剂状态
+   457→   457→        const antidoteUsed = get().witchAntidoteUsed || (action.witchSave === true)
+   458→   458→        const poisonUsed = get().witchPoisonUsed || (action.witchPoisonTarget !== undefined)
+   459→   459→
+   460→   460→        set({
+   461→   461→          players: finalPlayers,
+   462→   462→          lastGuardTarget: result.newLastGuard,
+   463→   463→          witchAntidoteUsed: antidoteUsed,
+   464→   464→          witchPoisonUsed: poisonUsed,
+   465→   465→          killedThisNight: result.deaths,
+   466→   466→        })
+   467→   467→
+   468→   468→        get().addLog({
+   469→   469→          type: 'night',
+   470→   470→          day,
+   471→   471→          phase: 'night-end',
+   472→   472→          content:
+   473→   473→            result.deaths.length === 0
+   474→   474→              ? `☀️ 第 ${day} 天天亮了，昨晚平安夜，无人死亡。`
+   475→   475→              : `☀️ 第 ${day} 天天亮了，昨晚 ${result.deaths.length} 号玩家死亡。`,
+   476→   476→        })
+   477→   477→
+   478→   478→        // 关键事件 Toast 提示 + 音效
+   479→   479→        if (result.deaths.length === 0) {
+   480→   480→          get().showToast('☀️ 昨晚平安夜，无人死亡', 'success')
+   481→   481→          playSfx('day')
+   482→   482→        } else {
+   483→   483→          playSfx('death')
+   484→   484→          const userDied = result.deaths.includes(get().userPlayerId)
+   485→   485→          if (userDied) {
+   486→   486→            get().showToast('💀 你在昨晚被击杀了！', 'danger')
+   487→   487→          } else {
+   488→   488→            get().showToast(`☀️ 昨晚 ${result.deaths.map((d) => d + '号').join('、')} 死亡`, 'info')
+   489→   489→            setTimeout(() => playSfx('day'), 600)
+   490→   490→          }
+   491→   491→        }
+   492→   492→
+   493→   493→        // 检查猎人（夜晚死亡）
+   494→   494→        const huntersDied = finalPlayers.filter(
+   495→   495→          (p) => !p.isAlive && result.deaths.includes(p.id) && p.role === 'hunter' && !p.poisoned,
+   496→   496→        )
+   497→   497→        if (huntersDied.length > 0) {
+   498→   498→          const hunter = huntersDied[0]
+   499→   499→          set({ hunterPending: hunter.id, phase: 'hunter-shoot', processing: false })
+   500→   500→          if (hunter.isUser) {
+   501→   501→            // 等待用户开枪
+   502→   502→            return
+   503→   503→          } else {
+   504→   504→            // AI猎人开枪
+   505→   505→            const targets = alivePlayers(finalPlayers)
+   506→   506→            const aiRes = await callAI({
+   507→   507→              action: 'hunter-shoot',
+   508→   508→              playerId: hunter.id,
+   509→   509→              players: get().players.map((p) => ({
+   510→   510→                id: p.id,
+   511→   511→                name: p.name,
+   512→   512→                avatar: p.avatar,
+   513→   513→                alive: p.isAlive,
+   514→   514→                isUser: p.isUser,
+   515→   515→                role: p.role,
+   516→   516→              })),
+   517→   517→              day,
+   518→   518→            })
+   519→   519→            const target = aiRes?.targetId ?? (targets.length > 0 ? randomPick(targets)?.id : null)
+   520→   520→            await get().userHunterShoot(target ?? null)
+   521→   521→            return
+   522→   522→          }
+   523→   523→        }
+   524→   524→
+   525→   525→        // 检查胜负
+   526→   526→        const winner = checkWinner(finalPlayers)
+   527→   527→        if (winner) {
+   528→   528→          get().addLog({
+   529→   529→            type: 'result',
+   530→   530→            day,
+   531→   531→            phase: 'game-over',
+   532→   532→            content: winner === 'good' ? '🎉 好人阵营胜利！所有狼人已被消灭。' : '🌙 狼人阵营胜利！',
+   533→   533→          })
+   534→   534→          finishGame(winner, day)
+   535→   535→          return
+   536→   536→        }
+   537→   537→
+   538→   538→        // 进入白天：第一天先竞选警长，后续天直接公布
+   539→   539→        if (day === 1) {
+   540→   540→          set({ phase: 'day-sheriff-announce', processing: false, speeches: [], currentSpeaker: null })
+   541→   541→        } else {
+   542→   542→          set({ phase: 'day-announce', processing: false, speeches: [], currentSpeaker: null })
+   543→   543→        }
+   544→   544→        await delay(800)
+   545→   545→        get().proceedDayPhase()
+   546→   546→        return
+   547→   547→      }
+   548→   548→
+   549→   549→      set({ processing: false })
+   550→   550→    } catch (err) {
+   551→   551→      // 防御：任何异常都重置 processing，避免流程卡死
+   552→   552→      console.error('[proceedNightPhase] error:', err)
+   553→   553→      set({ processing: false, speaking: false })
+   554→   554→    }
+   555→   555→  },
+   556→   556→
+   557→   557→  // 用户夜晚行动
+   558→   558→  userNightAction: async (action) => {
+   559→   559→    const state = get()
+   560→   560→    set((s) => ({
+   561→   561→      nightAction: { ...(s.nightAction as NightAction), ...action },
+   562→   562→    }))
+   563→   563→
+   564→   564→    // 记录日志
+   565→   565→    const phase = state.phase
+   566→   566→    if (phase === 'night-guard') {
+   567→   567→      get().addLog({
+   568→   568→        type: 'action',
+   569→   569→        day: state.day,
+   570→   570→        phase,
+   571→   571→        playerId: state.userPlayerId,
+   572→   572→        playerName: '你',
+   573→   573→        content: action.guardTarget !== undefined ? `你守护了 ${action.guardTarget} 号玩家` : '你今晚空守',
+   574→   574→      })
+   575→   575→    } else if (phase === 'night-wolf') {
+   576→   576→      get().addLog({
+   577→   577→        type: 'action',
+   578→   578→        day: state.day,
+   579→   579→        phase,
+   580→   580→        playerId: state.userPlayerId,
+   581→   581→        playerName: '你',
+   582→   582→        content: action.wolfTarget !== undefined ? `你选择了击杀 ${action.wolfTarget} 号玩家` : '你今晚空刀',
+   583→   583→      })
+   584→   584→    } else if (phase === 'night-seer') {
+   585→   585→      if (action.seerTarget !== undefined) {
+   586→   586→        const t = state.players.find((p) => p.id === action.seerTarget)
+   587→   587→        const result = t && isWolf(t.role) ? '狼人' : '好人'
+   588→   588→        action.seerResult = t && isWolf(t.role) ? 'wolf' : 'good'
+   589→   589→        playSfx('seerScan')
+   590→   590→        get().addLog({
+   591→   591→          type: 'action',
+   592→   592→          day: state.day,
+   593→   593→          phase,
+   594→   594→          playerId: state.userPlayerId,
+   595→   595→          playerName: '你',
+   596→   596→          content: `你查验了 ${action.seerTarget} 号玩家，结果是【${result}】`,
+   597→   597→        })
+   598→   598→        // 设置待展示的查验结果，暂停流程等用户确认
+   599→   599→        set({
+   600→   600→          seerResultPending: {
+   601→   601→            targetId: action.seerTarget,
+   602→   602→            targetName: t?.name || '',
+   603→   603→            result: action.seerResult!,
+   604→   604→          },
+   605→   605→          nightAction: { ...(get().nightAction as NightAction), seerTarget: action.seerTarget, seerResult: action.seerResult },
+   606→   606→        })
+   607→   607→        return // 不立即推进，等用户查看结果后调用 confirmSeerResult
+   608→   608→      }
+   609→   609→    } else if (phase === 'night-witch') {
+   610→   610→      if (action.witchSave) {
+   611→   611→        get().addLog({
+   612→   612→          type: 'action',
+   613→   613→          day: state.day,
+   614→   614→          phase,
+   615→   615→          content: '你使用了解药救人',
+   616→   616→        })
+   617→   617→      }
+   618→   618→      if (action.witchPoisonTarget !== undefined) {
+   619→   619→        get().addLog({
+   620→   620→          type: 'action',
+   621→   621→          day: state.day,
+   622→   622→          phase,
+   623→   623→          content: `你毒杀了 ${action.witchPoisonTarget} 号玩家`,
+   624→   624→        })
+   625→   625→      }
+   626→   626→      if (!action.witchSave && action.witchPoisonTarget === undefined) {
+   627→   627→        get().addLog({
+   628→   628→          type: 'action',
+   629→   629→          day: state.day,
+   630→   630→          phase,
+   631→   631→          content: '你今晚没有使用任何药剂',
+   632→   632→        })
+   633→   633→      }
+   634→   634→    }
+   635→   635→
+   636→   636→    // 推进到下一阶段
+   637→   637→    const nextPhase: Record<string, GamePhase> = {
+   638→   638→      'night-guard': 'night-wolf',
+   639→   639→      'night-wolf': 'night-seer',
+   640→   640→      'night-seer': 'night-witch',
+   641→   641→      'night-witch': 'night-end',
+   642→   642→    }
+   643→   643→    const np = nextPhase[phase]
+   644→   644→    // 注意：必须设置 processing: false，否则 proceedNightPhase 开头的
+   645→   645→    // if(state.processing) return 会直接退出，导致流程卡死
+   646→   646→    set({ phase: np, processing: false })
+   647→   647→    await delay(400)
+   648→   648→    // 继续夜晚流程
+   649→   649→    get().proceedNightPhase()
+   650→   650→  },
+   651→   651→
+   652→   652→  // ========== 白天流程 ==========
+   653→   653→  proceedDayPhase: async () => {
+   654→   654→    const state = get()
+   655→   655→    if (state.processing) return
+   656→   656→    set({ processing: true })
+   657→   657→    const day = state.day
+   658→   658→
+   659→   659→    try {
+   660→   660→      // ---- 警长竞选公告（仅第一天） ----
+   661→   661→      if (state.phase === 'day-sheriff-announce') {
+   662→   662→        get().addLog({
+   663→   663→          type: 'day',
+   664→   664→          day,
+   665→   665→          phase: 'day-sheriff-announce',
+   666→   666→          content: '🏛️ 第一天白天，开始竞选警长！想当警长的玩家请上警。',
+   667→   667→        })
+   668→   668→        get().showToast('🏛️ 开始竞选警长！', 'info')
+   669→   669→        set({
+   670→   670→          phase: 'day-sheriff-campaign',
+   671→   671→          sheriffCandidates: [],
+   672→   672→          sheriffVotes: [],
+   673→   673→          sheriffCampaignIdx: 0,
+   674→   674→          speeches: [],
+   675→   675→          processing: false,
+   676→   676→        })
+   677→   677→        await delay(800)
+   678→   678→        get().proceedDayPhase()
+   679→   679→        return
+   680→   680→      }
+   681→   681→
+   682→   682→      // ---- 警长竞选发言 ----
+   683→   683→      if (state.phase === 'day-sheriff-campaign') {
+   684→   684→        const alive = alivePlayers(state.players)
+   685→   685→        const userId = state.userPlayerId
+   686→   686→        let candidates = [...state.sheriffCandidates]
+   687→   687→
+   688→   688→        // 收集 AI 玩家的上警决定（在用户决定后，AI 也决定）
+   689→   689→        // 如果用户已决定（上警或不上警），且还没收集完所有 AI 决定
+   690→   690→        const userDecided = candidates.includes(userId) || state.sheriffCampaignIdx > 0 || get()._aiSheriffDecided
+   691→   691→        if (!userDecided) {
+   692→   692→          // 等待用户决定是否上警
+   693→   693→          set({ processing: false })
+   694→   694→          return
+   695→   695→        }
+   696→   696→
+   697→   697→        // 一次性收集所有 AI 玩家的上警决定
+   698→   698→        if (!get()._aiSheriffDecided) {
+   699→   699→          set({ _aiSheriffDecided: true })
+   700→   700→          for (const p of alive) {
+   701→   701→            if (p.isUser) continue
+   702→   702→            // AI 上警概率：预言家90%，狼人60%，女巫40%，猎人30%，守卫20%，平民20%
+   703→   703→            const probMap: Record<string, number> = { seer: 0.9, wolf: 0.6, 'white-wolf': 0.6, witch: 0.4, hunter: 0.3, guard: 0.2, villager: 0.2, knight: 0.3 }
+   704→   704→            const prob = probMap[p.role] ?? 0.2
+   705→   705→            if (Math.random() < prob) {
+   706→   706→              candidates.push(p.id)
+   707→   707→              get().addLog({
+   708→   708→                type: 'day', day, phase: 'day-sheriff-campaign',
+   709→   709→                content: `${p.id}号(${p.name})上警！`,
+   710→   710→              })
+   711→   711→            }
+   712→   712→          }
+   713→   713→          set({ sheriffCandidates: candidates })
+   714→   714→          await delay(400)
+   715→   715→        }
+   716→   716→
+   717→   717→        // 候选人依次发言
+   718→   718→        if (state.sheriffCampaignIdx < candidates.length) {
+   719→   719→          const candidateId = candidates[state.sheriffCampaignIdx]
+   720→   720→          const candidate = get().players.find((p) => p.id === candidateId)
+   721→   721→          if (candidate && candidate.isAlive) {
+   722→   722→            if (candidate.isUser) {
+   723→   723→              // 等待用户发言
+   724→   724→              set({ currentSpeaker: candidateId, processing: false })
+   725→   725→              return
+   726→   726→            } else {
+   727→   727→              // AI 候选人发言
+   728→   728→              set({ speaking: true, processing: true })
+   729→   729→              const aiRes = await callAI({
+   730→   730→                action: 'sheriff-campaign',
+   731→   731→                playerId: candidate.id,
+   732→   732→                players: get().players.map((p) => ({
+   733→   733→                  id: p.id, name: p.name, avatar: p.avatar, alive: p.isAlive, isUser: p.isUser, role: p.role,
+   734→   734→                })),
+   735→   735→                candidates,
+   736→   736→                day,
+   737→   737→              })
+   738→   738→              const content = aiRes?.content || '我上警是为了带领大家找出狼人，请相信我。'
+   739→   739→              const speech: Speech = { playerId: candidate.id, playerName: candidate.name, content, isUser: false }
+   740→   740→              set((s) => ({ speeches: [...s.speeches, speech], speaking: false }))
+   741→   741→              get().addLog({
+   742→   742→                type: 'speech', day, phase: 'day-sheriff-campaign',
+   743→   743→                playerId: candidate.id, playerName: candidate.name,
+   744→   744→                content: `🏛️ ${candidate.name}(${candidate.id}号)竞选警长：${content}`,
+   745→   745→              })
+   746→   746→              await delay(700)
+   747→   747→            }
+   748→   748→          }
+   749→   749→          set({ sheriffCampaignIdx: state.sheriffCampaignIdx + 1, processing: false })
+   750→   750→          get().proceedDayPhase()
+   751→   751→          return
+   752→   752→        }
+   753→   753→
+   754→   754→        // 所有候选人发言完毕，进入投票
+   755→   755→        // 如果只有一个候选人，直接当选
+   756→   756→        if (candidates.length === 1) {
+   757→   757→          const sheriffId = candidates[0]
+   758→   758→          set({ sheriffId, phase: 'day-announce', processing: false, currentSpeaker: null })
+   759→   759→          get().addLog({
+   760→   760→            type: 'day', day, phase: 'day-sheriff-campaign',
+   761→   761→            content: `🏛️ ${sheriffId}号无人竞争，自动当选警长！`,
+   762→   762→          })
+   763→   763→          get().showToast(`🏛️ ${sheriffId}号当选警长`, 'success')
+   764→   764→          await delay(800)
+   765→   765→          get().proceedDayPhase()
+   766→   766→          return
+   767→   767→        }
+   768→   768→        // 没人上警，警徽流失
+   769→   769→        if (candidates.length === 0) {
+   770→   770→          get().addLog({
+   771→   771→            type: 'day', day, phase: 'day-sheriff-campaign',
+   772→   772→            content: '🏛️ 无人竞选警长，警徽流失，本局无警长。',
+   773→   773→          })
+   774→   774→          get().showToast('🏛️ 无人上警，本局无警长', 'info')
+   775→   775→          set({ sheriffId: null, phase: 'day-announce', processing: false, currentSpeaker: null })
+   776→   776→          await delay(800)
+   777→   777→          get().proceedDayPhase()
+   778→   778→          return
+   779→   779→        }
+   780→   780→        // 多人竞选，进入投票
+   781→   781→        get().addLog({
+   782→   782→          type: 'day', day, phase: 'day-sheriff-campaign',
+   783→   783→          content: `🗳️ 候选人发言完毕，未上警的玩家开始投票选出警长。`,
+   784→   784→        })
+   785→   785→        set({ phase: 'day-sheriff-vote', sheriffVotes: [], processing: false })
+   786→   786→        await delay(500)
+   787→   787→        get().proceedDayPhase()
+   788→   788→        return
+   789→   789→      }
+   790→   790→
+   791→   791→      // ---- 警长竞选投票 ----
+   792→   792→      if (state.phase === 'day-sheriff-vote') {
+   793→   793→        const alive = alivePlayers(state.players)
+   794→   794→        const candidates = state.sheriffCandidates
+   795→   795→        const existingVotes = get().sheriffVotes
+   796→   796→        const votedIds = new Set(existingVotes.map((v) => v.voterId))
+   797→   797→        const userId = state.userPlayerId
+   798→   798→        const userIsCandidate = candidates.includes(userId)
+   799→   799→        const userVoted = votedIds.has(userId)
+   800→   800→        // 未上警的玩家投票；上警的玩家不投票
+   801→   801→        const voters = alive.filter((p) => !candidates.includes(p.id))
+   802→   802→
+   803→   803→        // 用户未上警且未投票，等待用户
+   804→   804→        if (!userIsCandidate && !userVoted) {
+   805→   805→          set({ processing: false })
+   806→   806→          return
+   807→   807→        }
+   808→   808→
+   809→   809→        // 收集 AI 投票
+   810→   810→        set({ processing: true })
+   811→   811→        for (const p of voters) {
+   812→   812→          if (p.isUser) continue
+   813→   813→          if (votedIds.has(p.id)) continue
+   814→   814→          const aiRes = await callAI({
+   815→   815→            action: 'sheriff-vote',
+   816→   816→            playerId: p.id,
+   817→   817→            players: get().players.map((pp) => ({
+   818→   818→              id: pp.id, name: pp.name, avatar: pp.avatar, alive: pp.isAlive, isUser: pp.isUser, role: pp.role,
+   819→   819→            })),
+   820→   820→            candidates,
+   821→   821→            speeches: get().speeches,
+   822→   822→            day,
+   823→   823→          })
+   824→   824→          const targetId = aiRes?.targetId ?? randomPick(candidates.map((id) => get().players.find((pp) => pp.id === id)).filter(Boolean))?.id ?? null
+   825→   825→          const target = targetId !== null ? get().players.find((pp) => pp.id === targetId) : null
+   826→   826→          const vote: VoteRecord = { voterId: p.id, voterName: p.name, targetId, targetName: target ? target.name : null }
+   827→   827→          set((s) => ({ sheriffVotes: [...s.sheriffVotes, vote] }))
+   828→   828→          votedIds.add(p.id)
+   829→   829→          await delay(120)
+   830→   830→        }
+   831→   831→
+   832→   832→        // 统计警长票
+   833→   833→        const svotes = get().sheriffVotes
+   834→   834→        const tally = tallyVotes(svotes.map((v) => ({ voterId: v.voterId, targetId: v.targetId })))
+   835→   835→        let sheriffId: number | null = tally.winnerId
+   836→   836→        if (tally.tie) sheriffId = svotes.length > 0 ? randomPick(svotes.filter((v) => v.targetId !== null).map((v) => v.targetId!)) ?? null : null
+   837→   837→        if (sheriffId !== null) {
+   838→   838→          get().addLog({
+   839→   839→            type: 'day', day, phase: 'day-sheriff-vote',
+   840→   840→            content: `🏛️ ${sheriffId}号当选警长！（得票最多）`,
+   841→   841→          })
+   842→   842→          get().showToast(`🏛️ ${sheriffId}号当选警长`, 'success')
+   843→   843→        } else {
+   844→   844→          get().addLog({
+   845→   845→            type: 'day', day, phase: 'day-sheriff-vote',
+   846→   846→            content: '🏛️ 警长竞选平票，警徽流失。',
+   847→   847→          })
+   848→   848→          get().showToast('🏛️ 警长竞选平票，无警长', 'info')
+   849→   849→        }
+   850→   850→        set({ sheriffId, phase: 'day-announce', processing: false, currentSpeaker: null, speeches: [] })
+   851→   851→        await delay(800)
+   852→   852→        get().proceedDayPhase()
+   853→   853→        return
+   854→   854→      }
+   855→   855→
+   856→   856→      // ---- 公布死讯 ----
+   857→   857→      if (state.phase === 'day-announce') {
+   858→   858→        const deaths = state.killedThisNight
+   859→   859→        if (deaths.length === 0) {
+   860→   860→          get().addLog({
+   861→   861→            type: 'day', day, phase: 'day-announce',
+   862→   862→            content: `📋 昨晚平安夜，无人死亡。`,
+   863→   863→          })
+   864→   864→        } else {
+   865→   865→          const names = deaths.map((id) => `${id}号`).join('、')
+   866→   866→          get().addLog({
+   867→   867→            type: 'day', day, phase: 'day-announce',
+   868→   868→            content: `📋 昨晚 ${names} 玩家死亡。`,
+   869→   869→          })
+   870→   870→        }
+   871→   871→        // 第一天夜晚死亡的玩家有遗言；后续夜晚死亡无遗言
+   872→   872→        if (day === 1 && deaths.length > 0) {
+   873→   873→          set({ phase: 'day-lastwords', lastWordsPending: [...deaths], processing: false, speeches: [] })
+   874→   874→          await delay(600)
+   875→   875→          get().proceedDayPhase()
+   876→   876→          return
+   877→   877→        }
+   878→   878→        // 无遗言，直接进入讨论
+   879→   879→        set({ phase: 'day-discuss', speeches: [], currentSpeaker: null, speakStartIdx: null, speakCount: 0, processing: false })
+   880→   880→        await delay(600)
+   881→   881→        get().proceedDayPhase()
+   882→   882→        return
+   883→   883→      }
+   884→   884→
+   885→   885→      // ---- 死亡遗言 ----
+   886→   886→      if (state.phase === 'day-lastwords') {
+   887→   887→        const pending = get().lastWordsPending
+   888→   888→        if (pending.length === 0) {
+   889→   889→          // 遗言结束，进入讨论
+   890→   890→          set({ phase: 'day-discuss', speeches: [], currentSpeaker: null, speakStartIdx: null, speakCount: 0, processing: false })
+   891→   891→          await delay(500)
+   892→   892→          get().proceedDayPhase()
+   893→   893→          return
+   894→   894→        }
+   895→   895→        const dyingId = pending[0]
+   896→   896→        const dying = get().players.find((p) => p.id === dyingId)
+   897→   897→        if (!dying) {
+   898→   898→          set({ lastWordsPending: pending.slice(1) })
+   899→   899→          get().proceedDayPhase()
+   900→   900→          return
+   901→   901→        }
+   902→   902→        get().addLog({
+   903→   903→          type: 'day', day, phase: 'day-lastwords',
+   904→   904→          playerId: dying.id, playerName: dying.name,
+   905→   905→          content: `💬 ${dying.name}(${dying.id}号)临终遗言：`,
+   906→   906→        })
+   907→   907→        if (dying.isUser) {
+   908→   908→          // 等待用户输入遗言
+   909→   909→          set({ currentSpeaker: dyingId, processing: false })
+   910→   910→          return
+   911→   911→        } else {
+   912→   912→          // AI 遗言
+   913→   913→          set({ speaking: true, processing: true })
+   914→   914→          const aiRes = await callAI({
+   915→   915→            action: 'last-words',
+   916→   916→            playerId: dying.id,
+   917→   917→            players: get().players.map((p) => ({
+   918→   918→              id: p.id, name: p.name, avatar: p.avatar, alive: p.isAlive, isUser: p.isUser, role: p.role,
+   919→   919→            })),
+   920→   920→            day,
+   921→   921→          })
+   922→   922→          const content = aiRes?.content || '我是好人，请大家相信我...咳咳...'
+   923→   923→          get().addLog({
+   924→   924→            type: 'speech', day, phase: 'day-lastwords',
+   925→   925→            playerId: dying.id, playerName: dying.name,
+   926→   926→            content: `"${content}"`,
+   927→   927→          })
+   928→   928→          set({ speaking: false })
+   929→   929→          await delay(700)
+   930→   930→          set({ lastWordsPending: pending.slice(1), processing: false })
+   931→   931→          get().proceedDayPhase()
+   932→   932→          return
+   933→   933→        }
+   934→   934→      }
+   935→   935→
+   936→   936→      // ---- 白天讨论（绕回发言，所有人发言一次） ----
+   937→   937→      if (state.phase === 'day-discuss') {
+   938→   938→        const alive = alivePlayers(state.players)
+   939→   939→        // 初始化起始发言者
+   940→   940→        if (state.currentSpeaker === null) {
+   941→   941→          // 警长决定起始：从警长右边开始；无警长则随机
+   942→   942→          let startIdx: number
+   943→   943→          if (state.sheriffId !== null) {
+   944→   944→            const sheriffIdx = alive.findIndex((p) => p.id === state.sheriffId)
+   945→   945→            startIdx = sheriffIdx >= 0 ? (sheriffIdx + 1) % alive.length : Math.floor(Math.random() * alive.length)
+   946→   946→          } else {
+   947→   947→            startIdx = Math.floor(Math.random() * alive.length)
+   948→   948→          }
+   949→   949→          set({
+   950→   950→            currentSpeaker: alive[startIdx].id,
+   951→   951→            speakStartIdx: startIdx,
+   952→   952→            speakCount: 0,
+   953→   953→          })
+   954→   954→        }
+   955→   955→
+   956→   956→        const currentId = get().currentSpeaker
+   957→   957→        const startIdx = get().speakStartIdx ?? 0
+   958→   958→        const speakCount = get().speakCount
+   959→   959→
+   960→   960→        if (currentId === null || speakCount >= alive.length) {
+   961→   961→          // 所有人发言完毕，进入投票
+   962→   962→          set({ phase: 'day-vote', currentSpeaker: null, votes: [], processing: false })
+   963→   963→          await delay(500)
+   964→   964→          get().proceedDayPhase()
+   965→   965→          return
+   966→   966→        }
+   967→   967→
+   968→   968→        const speaker = get().players.find((p) => p.id === currentId)
+   969→   969→        if (!speaker || !speaker.isAlive) {
+   970→   970→          // 跳到下一个（绕回）
+   971→   971→          const idx = alive.findIndex((p) => p.id === currentId)
+   972→   972→          const nextIdx = (idx + 1) % alive.length
+   973→   973→          set({ currentSpeaker: alive[nextIdx].id })
+   974→   974→          get().proceedDayPhase()
+   975→   975→          return
+   976→   976→        }
+   977→   977→
+   978→   978→        if (speaker.isUser) {
+   979→   979→          // 等待用户发言
+   980→   980→          set({ processing: false })
+   981→   981→          return
+   982→   982→        }
+   983→   983→
+   984→   984→        // AI 发言
+   985→   985→        set({ speaking: true, processing: true })
+   986→   986→        const aiRes = await callAI({
+   987→   987→          action: 'day-speak',
+   988→   988→          playerId: speaker.id,
+   989→   989→          players: get().players.map((p) => ({
+   990→   990→            id: p.id, name: p.name, avatar: p.avatar, alive: p.isAlive, isUser: p.isUser, role: p.role,
+   991→   991→          })),
+   992→   992→          speeches: get().speeches,
+   993→   993→          day,
+   994→   994→          killedThisNight: get().killedThisNight,
+   995→   995→        })
+   996→   996→        const content = aiRes?.content || '我暂时没有线索，先听听大家的。'
+   997→   997→        const speech: Speech = { playerId: speaker.id, playerName: speaker.name, content, isUser: false }
+   998→   998→        set((s) => ({ speeches: [...s.speeches, speech], speaking: false }))
+   999→   999→        get().addLog({
+  1000→  1000→          type: 'speech', day, phase: 'day-discuss',
+  1001→  1001→          playerId: speaker.id, playerName: speaker.name,
+  1002→  1002→          content: `${speaker.name}(${speaker.id}号)：${content}`,
+  1003→  1003→        })
+  1004→  1004→        await delay(800)
+  1005→  1005→
+  1006→  1006→        // 下一个发言者（绕回）
+  1007→  1007→        const idx = alive.findIndex((p) => p.id === currentId)
+  1008→  1008→        const nextIdx = (idx + 1) % alive.length
+  1009→  1009→        const newCount = get().speakCount + 1
+  1010→  1010→        set({ currentSpeaker: alive[nextIdx].id, speakCount: newCount, processing: false })
+  1011→  1011→        get().proceedDayPhase()
+  1012→  1012→        return
+  1013→  1013→      }
+  1014→  1014→
+  1015→  1015→      if (state.phase === 'day-vote') {
+  1016→  1016→        const alive = alivePlayers(state.players)
+  1017→  1017→        const existingVotes = get().votes
+  1018→  1018→        const votedIds = new Set(existingVotes.map((v) => v.voterId))
+  1019→  1019→        const userVoted = votedIds.has(state.userPlayerId)
+  1020→  1020→        const userAlive = alive.some((p) => p.id === state.userPlayerId)
+  1021→  1021→
+  1022→  1022→        if (userAlive && !userVoted) {
+  1023→  1023→          set({ processing: false })
+  1024→  1024→          return
+  1025→  1025→        }
+  1026→  1026→
+  1027→  1027→        // 收集所有AI存活玩家的投票
+  1028→  1028→        set({ processing: true })
+  1029→  1029→        for (const p of alive) {
+  1030→  1030→          if (p.isUser) continue
+  1031→  1031→          if (votedIds.has(p.id)) continue
+  1032→  1032→          const aiRes = await callAI({
+  1033→  1033→            action: 'day-vote',
+  1034→  1034→            playerId: p.id,
+  1035→  1035→            players: get().players.map((pp) => ({
+  1036→  1036→              id: pp.id, name: pp.name, avatar: pp.avatar, alive: pp.isAlive, isUser: pp.isUser, role: pp.role,
+  1037→  1037→            })),
+  1038→  1038→            speeches: get().speeches,
+  1039→  1039→            day,
+  1040→  1040→          })
+  1041→  1041→          const targetId = aiRes?.targetId ?? null
+  1042→  1042→          const target = targetId !== null ? get().players.find((pp) => pp.id === targetId) : null
+  1043→  1043→          const vote: VoteRecord = { voterId: p.id, voterName: p.name, targetId, targetName: target ? target.name : null }
+  1044→  1044→          set((s) => ({ votes: [...s.votes, vote] }))
+  1045→  1045→          votedIds.add(p.id)
+  1046→  1046→          await delay(150)
+  1047→  1047→        }
+  1048→  1048→
+  1049→  1049→        // 统计投票（警长票算1.5票）
+  1050→  1050→        const votes = get().votes
+  1051→  1051→        const sheriffId = get().sheriffId
+  1052→  1052→        const counts: Record<number, number> = {}
+  1053→  1053→        for (const v of votes) {
+  1054→  1054→          if (v.targetId !== null) {
+  1055→  1055→            const weight = v.voterId === sheriffId ? 1.5 : 1
+  1056→  1056→            counts[v.targetId] = (counts[v.targetId] || 0) + weight
+  1057→  1057→          }
+  1058→  1058→        }
+  1059→  1059→        const entries = Object.entries(counts).map(([id, c]) => ({ id: Number(id), count: c }))
+  1060→  1060→        let winnerId: number | null = null
+  1061→  1061→        let tie = false
+  1062→  1062→        if (entries.length > 0) {
+  1063→  1063→          entries.sort((a, b) => b.count - a.count)
+  1064→  1064→          if (entries.length > 1 && entries[0].count === entries[1].count) {
+  1065→  1065→            tie = true
+  1066→  1066→          } else {
+  1067→  1067→            winnerId = entries[0].id
+  1068→  1068→          }
+  1069→  1069→        }
+  1070→  1070→
+  1071→  1071→        get().addLog({
+  1072→  1072→          type: 'vote', day, phase: 'day-result',
+  1073→  1073→          content: winnerId === null ? (tie ? `投票平票，无人出局。` : `全员弃票，无人出局。`) : `${winnerId}号玩家被投票放逐！`,
+  1074→  1074→        })
+  1075→  1075→        if (winnerId !== null) {
+  1076→  1076→          playSfx('death')
+  1077→  1077→          if (winnerId === get().userPlayerId) {
+  1078→  1078→            get().showToast('出局 你被投票放逐了！', 'danger')
+  1079→  1079→          } else {
+  1080→  1080→            get().showToast(`🗳️ ${winnerId}号被投票放逐`, 'info')
+  1081→  1081→          }
+  1082→  1082→        } else {
+  1083→  1083→          get().showToast('🗳️ 投票平票，无人出局', 'info')
+  1084→  1084→        }
+  1085→  1085→        const detail = votes.map((v) => `${v.voterName}${v.voterId === sheriffId ? '(警长1.5票)' : ''}→${v.targetName || '弃票'}`).join('，')
+  1086→  1086→        get().addLog({ type: 'vote', day, phase: 'day-result', content: `投票详情：${detail}` })
+  1087→  1087→
+  1088→  1088→        let finalPlayers = get().players
+  1089→  1089→        if (winnerId !== null) {
+  1090→  1090→          finalPlayers = get().players.map((p) =>
+  1091→  1091→            p.id === winnerId ? { ...p, isAlive: false, deathReason: '被投票放逐', deathDay: day } : p,
+  1092→  1092→          )
+  1093→  1093→          set({ players: finalPlayers })
+  1094→  1094→          // 被投票出局者有遗言
+  1095→  1095→        }
+  1096→  1096→
+  1097→  1097→        // 检查猎人（被投票出局）
+  1098→  1098→        const outHunter = finalPlayers.find((p) => !p.isAlive && p.id === winnerId && p.role === 'hunter')
+  1099→  1099→        if (outHunter) {
+  1100→  1100→          set({ hunterPending: outHunter.id, phase: 'hunter-shoot', processing: false })
+  1101→  1101→          if (outHunter.isUser) {
+  1102→  1102→            return
+  1103→  1103→          } else {
+  1104→  1104→            const targets = alivePlayers(finalPlayers)
+  1105→  1105→            const aiRes = await callAI({
+  1106→  1106→              action: 'hunter-shoot', playerId: outHunter.id,
+  1107→  1107→              players: get().players.map((p) => ({ id: p.id, name: p.name, avatar: p.avatar, alive: p.isAlive, isUser: p.isUser, role: p.role })),
+  1108→  1108→              day,
+  1109→  1109→            })
+  1110→  1110→            const target = aiRes?.targetId ?? (targets.length > 0 ? randomPick(targets)?.id : null)
+  1111→  1111→            await get().userHunterShoot(target ?? null)
+  1112→  1112→            return
+  1113→  1113→          }
+  1114→  1114→        }
+  1115→  1115→
+  1116→  1116→        // 检查胜负
+  1117→  1117→        const winner = checkWinner(finalPlayers)
+  1118→  1118→        if (winner) {
+  1119→  1119→          get().addLog({
+  1120→  1120→            type: 'result', day, phase: 'game-over',
+  1121→  1121→            content: winner === 'good' ? '🎉 好人阵营胜利！' : '🌙 狼人阵营胜利！',
+  1122→  1122→          })
+  1123→  1123→          finishGame(winner, day)
+  1124→  1124→          return
+  1125→  1125→        }
+  1126→  1126→
+  1127→  1127→        // 被投票出局者发表遗言
+  1128→  1128→        if (winnerId !== null) {
+  1129→  1129→          set({ phase: 'day-lastwords', lastWordsPending: [winnerId], processing: false })
+  1130→  1130→          await delay(500)
+  1131→  1131→          get().proceedDayPhase()
+  1132→  1132→          return
+  1133→  1133→        }
+  1134→  1134→
+  1135→  1135→        // 进入下一夜
+  1136→  1136→        set({
+  1137→  1137→          phase: 'night-start', day: day + 1,
+  1138→  1138→          speeches: [], votes: [], currentSpeaker: null, speakStartIdx: null, speakCount: 0,
+  1139→  1139→          killedThisNight: [], processing: false,
+  1140→  1140→        })
+  1141→  1141→        await delay(800)
+  1142→  1142→        get().proceedNightPhase()
+  1143→  1143→        return
+  1144→  1144→      }
+  1145→  1145→
+  1146→  1146→      set({ processing: false })
+  1147→  1147→    } catch (err) {
+  1148→  1148→      console.error('[proceedDayPhase] error:', err)
+  1149→  1149→      set({ processing: false, speaking: false })
+  1150→  1150→    }
+  1151→  1151→  },
+  1152→  1152→
+  1153→  1153→  userSpeak: async (content) => {
+  1154→  1154→    const state = get()
+  1155→  1155→    const speaker = state.players.find((p) => p.id === state.userPlayerId)
+  1156→  1156→    if (!speaker) return
+  1157→  1157→    const speech: Speech = { playerId: speaker.id, playerName: speaker.name, content, isUser: true }
+  1158→  1158→    set((s) => ({ speeches: [...s.speeches, speech] }))
+  1159→  1159→    get().addLog({
+  1160→  1160→      type: 'speech', day: state.day, phase: state.phase,
+  1161→  1161→      playerId: speaker.id, playerName: speaker.name,
+  1162→  1162→      content: `${speaker.name}(${speaker.id}号)：${content}`,
+  1163→  1163→    })
+  1164→  1164→
+  1165→  1165→    // 警长竞选发言
+  1166→  1166→    if (state.phase === 'day-sheriff-campaign') {
+  1167→  1167→      set({ sheriffCampaignIdx: state.sheriffCampaignIdx + 1, currentSpeaker: null, processing: false })
+  1168→  1168→      await delay(300)
+  1169→  1169→      get().proceedDayPhase()
+  1170→  1170→      return
+  1171→  1171→    }
+  1172→  1172→
+  1173→  1173→    // 死亡遗言
+  1174→  1174→    if (state.phase === 'day-lastwords') {
+  1175→  1175→      const pending = get().lastWordsPending
+  1176→  1176→      set({ lastWordsPending: pending.slice(1), currentSpeaker: null, processing: false })
+  1177→  1177→      await delay(300)
+  1178→  1178→      get().proceedDayPhase()
+  1179→  1179→      return
+  1180→  1180→    }
+  1181→  1181→
+  1182→  1182→    // 白天讨论：下一个发言者（绕回）
+  1183→  1183→    const alive = alivePlayers(get().players)
+  1184→  1184→    const idx = alive.findIndex((p) => p.id === speaker.id)
+  1185→  1185→    const nextIdx = (idx + 1) % alive.length
+  1186→  1186→    const newCount = get().speakCount + 1
+  1187→  1187→    set({ currentSpeaker: alive[nextIdx].id, speakCount: newCount, processing: false })
+  1188→  1188→    get().proceedDayPhase()
+  1189→  1189→  },
+  1190→  1190→
+  1191→  1191→  skipSpeak: async () => {
+  1192→  1192→    const state = get()
+  1193→  1193→    const speaker = state.players.find((p) => p.id === state.userPlayerId)
+  1194→  1194→    if (!speaker) return
+  1195→  1195→    get().addLog({
+  1196→  1196→      type: 'speech', day: state.day, phase: state.phase,
+  1197→  1197→      playerId: speaker.id, playerName: speaker.name,
+  1198→  1198→      content: state.phase === 'day-lastwords' ? `${speaker.name}(${speaker.id}号) 没有留下遗言。` : `${speaker.name}(${speaker.id}号)：我暂时没什么要说的。`,
+  1199→  1199→    })
+  1200→  1200→
+  1201→  1201→    if (state.phase === 'day-sheriff-campaign') {
+  1202→  1202→      set({ sheriffCampaignIdx: state.sheriffCampaignIdx + 1, currentSpeaker: null, processing: false })
+  1203→  1203→      await delay(300)
+  1204→  1204→      get().proceedDayPhase()
+  1205→  1205→      return
+  1206→  1206→    }
+  1207→  1207→    if (state.phase === 'day-lastwords') {
+  1208→  1208→      const pending = get().lastWordsPending
+  1209→  1209→      set({ lastWordsPending: pending.slice(1), currentSpeaker: null, processing: false })
+  1210→  1210→      await delay(300)
+  1211→  1211→      get().proceedDayPhase()
+  1212→  1212→      return
+  1213→  1213→    }
+  1214→  1214→
+  1215→  1215→    const alive = alivePlayers(get().players)
+  1216→  1216→    const idx = alive.findIndex((p) => p.id === speaker.id)
+  1217→  1217→    const nextIdx = (idx + 1) % alive.length
+  1218→  1218→    const newCount = get().speakCount + 1
+  1219→  1219→    set({ currentSpeaker: alive[nextIdx].id, speakCount: newCount, processing: false })
+  1220→  1220→    get().proceedDayPhase()
+  1221→  1221→  },
+  1222→  1222→
+  1223→  1223→  userVote: async (targetId) => {
+  1224→  1224→    const state = get()
+  1225→  1225→    // 警长竞选投票
+  1226→  1226→    if (state.phase === 'day-sheriff-vote') {
+  1227→  1227→      const voter = state.players.find((p) => p.id === state.userPlayerId)
+  1228→  1228→      if (!voter) return
+  1229→  1229→      const target = targetId !== null ? state.players.find((p) => p.id === targetId) : null
+  1230→  1230→      const vote: VoteRecord = { voterId: voter.id, voterName: voter.name, targetId, targetName: target ? target.name : null }
+  1231→  1231→      set((s) => ({ sheriffVotes: [...s.sheriffVotes, vote] }))
+  1232→  1232→      get().addLog({
+  1233→  1233→        type: 'vote', day: state.day, phase: 'day-sheriff-vote',
+  1234→  1234→        playerId: voter.id, playerName: voter.name,
+  1235→  1235→        content: target ? `你投票给 ${target.name}(${target.id}号)当警长` : '你弃票',
+  1236→  1236→      })
+  1237→  1237→      set({ processing: false })
+  1238→  1238→      get().proceedDayPhase()
+  1239→  1239→      return
+  1240→  1240→    }
+  1241→  1241→    // 普通投票
+  1242→  1242→    const voter = state.players.find((p) => p.id === state.userPlayerId)
+  1243→  1243→    if (!voter) return
+  1244→  1244→    const target = targetId !== null ? state.players.find((p) => p.id === targetId) : null
+  1245→  1245→    const vote: VoteRecord = { voterId: voter.id, voterName: voter.name, targetId, targetName: target ? target.name : null }
+  1246→  1246→    set((s) => ({ votes: [...s.votes, vote] }))
+  1247→  1247→    get().addLog({
+  1248→  1248→      type: 'vote', day: state.day, phase: 'day-vote',
+  1249→  1249→      playerId: voter.id, playerName: voter.name,
+  1250→  1250→      content: target ? `你投票给 ${target.name}(${target.id}号)` : '你弃票',
+  1251→  1251→    })
+  1252→  1252→    set({ processing: false })
+  1253→  1253→    get().proceedDayPhase()
+  1254→  1254→  },
+  1255→  1255→
+  1256→  1256→  // 用户决定是否上警
+  1257→  1257→  userJoinSheriff: (join) => {
+  1258→  1258→    const state = get()
+  1259→  1259→    if (join) {
+  1260→  1260→      if (!state.sheriffCandidates.includes(state.userPlayerId)) {
+  1261→  1261→        set({ sheriffCandidates: [...state.sheriffCandidates, state.userPlayerId] })
+  1262→  1262→        get().addLog({
+  1263→  1263→          type: 'day', day: state.day, phase: 'day-sheriff-campaign',
+  1264→  1264→          content: `${state.userPlayerId}号(你)上警！`,
+  1265→  1265→        })
+  1266→  1266→      }
+  1267→  1267→    } else {
+  1268→  1268→      get().addLog({
+  1269→  1269→        type: 'day', day: state.day, phase: 'day-sheriff-campaign',
+  1270→  1270→        content: `${state.userPlayerId}号(你)不上警。`,
+  1271→  1271→      })
+  1272→  1272→    }
+  1273→  1273→    set({ processing: false })
+  1274→  1274→    get().proceedDayPhase()
+  1275→  1275→  },
+  1276→  1276→
+  1277→  1277→  userSheriffVote: async (targetId) => {
+  1278→  1278→    await get().userVote(targetId)
+  1279→  1279→  },
+  1280→  1280→
+  1281→  1281→  userLastWords: (content) => {
+  1282→  1282→    get().userSpeak(content)
+  1283→  1283→  },
+  1284→  1284→
+  1285→  1285→  skipLastWords: () => {
+  1286→  1286→    get().skipSpeak()
+  1287→  1287→  },
+  1288→  1288→
+  1289→  1289→  userHunterShoot: async (targetId) => {
+  1290→  1290→    const state = get()
+  1291→  1291→    const hunter = state.players.find((p) => p.id === state.hunterPending)
+  1292→  1292→    if (!hunter) return
+  1293→  1293→    const fromNight = state.killedThisNight.includes(hunter.id)
+  1294→  1294→    if (targetId !== null) {
+  1295→  1295→      const target = state.players.find((p) => p.id === targetId)
+  1296→  1296→      playSfx('shoot')
+  1297→  1297→      set((s) => ({
+  1298→  1298→        players: s.players.map((p) =>
+  1299→  1299→          p.id === targetId
+  1300→  1300→            ? { ...p, isAlive: false, deathReason: '被猎人射杀', deathDay: state.day, hunted: true }
+  1301→  1301→            : p,
+  1302→  1302→        ),
+  1303→  1303→      }))
+  1304→  1304→      get().addLog({
+  1305→  1305→        type: 'action', day: state.day, phase: 'hunter-shoot',
+  1306→  1306→        playerId: hunter.id, playerName: hunter.name,
+  1307→  1307→        content: `🏹 ${hunter.name} 开枪带走了 ${target?.name}！`,
+  1308→  1308→      })
+  1309→  1309→    } else {
+  1310→  1310→      get().addLog({
+  1311→  1311→        type: 'action', day: state.day, phase: 'hunter-shoot',
+  1312→  1312→        playerId: hunter.id, playerName: hunter.name,
+  1313→  1313→        content: `🏹 ${hunter.name} 没有开枪。`,
+  1314→  1314→      })
+  1315→  1315→    }
+  1316→  1316→    set({ hunterPending: null })
+  1317→  1317→
+  1318→  1318→    // 检查胜负
+  1319→  1319→    const winner = checkWinner(get().players)
+  1320→  1320→    if (winner) {
+  1321→  1321→      get().addLog({
+  1322→  1322→        type: 'result', day: state.day, phase: 'game-over',
+  1323→  1323→        content: winner === 'good' ? '🎉 好人阵营胜利！' : '🌙 狼人阵营胜利！',
+  1324→  1324→      })
+  1325→  1325→      finishGame(winner, state.day)
+  1326→  1326→      return
+  1327→  1327→    }
+  1328→  1328→
+  1329→  1329→    // 猎人开枪后继续：夜晚死亡的猎人→进入白天；白天投票出局的猎人→继续下一夜
+  1330→  1330→    if (fromNight) {
+  1331→  1331→      // 来自夜晚结算，进入白天（第一天先警长竞选）
+  1332→  1332→      if (state.day === 1) {
+  1333→  1333→        set({ phase: 'day-sheriff-announce', processing: false })
+  1334→  1334→      } else {
+  1335→  1335→        set({ phase: 'day-announce', processing: false })
+  1336→  1336→      }
+  1337→  1337→    } else {
+  1338→  1338→      // 来自白天投票出局，进入下一夜
+  1339→  1339→      set({
+  1340→  1340→        phase: 'night-start', day: state.day + 1,
+  1341→  1341→        speeches: [], votes: [], currentSpeaker: null, speakStartIdx: null, speakCount: 0,
+  1342→  1342→        killedThisNight: [], processing: false,
+  1343→  1343→      })
+  1344→  1344→    }
+  1345→  1345→    await delay(600)
+  1346→  1346→    if (fromNight) {
+  1347→  1347→      get().proceedDayPhase()
+  1348→  1348→    } else {
+  1349→  1349→      get().proceedNightPhase()
+  1350→  1350→    }
+  1351→  1351→  },
+  1352→  1352→}))
+  1353→  1353→

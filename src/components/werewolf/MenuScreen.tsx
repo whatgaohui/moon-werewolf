@@ -136,44 +136,54 @@ export function MenuScreen() {
           <ScrollArea className="max-h-[60vh] pr-2">
             <div className="space-y-4 text-sm text-amber-100/80">
               <section>
-                <h3 className="font-bold text-amber-200 mb-1.5">🎯 游戏目标</h3>
-                <p>好人阵营找出并放逐所有狼人；狼人阵营消灭所有神职或所有平民。</p>
+                <h3 className="font-bold text-amber-200 mb-1.5">📋 v2.0 规则口径</h3>
+                <p>本游戏遵循《狼人杀手机 App 游戏规则与判定细则 v2.0》。默认采用<b>屠边规则</b>，主板子为<b>12 人预女猎守白狼王局</b>。</p>
               </section>
               <section>
-                <h3 className="font-bold text-amber-200 mb-1.5">🌙 夜晚阶段</h3>
+                <h3 className="font-bold text-amber-200 mb-1.5">🎯 胜利条件（屠边）</h3>
                 <ul className="space-y-1 list-disc pl-4">
-                  <li><b>守卫</b>：守护一名玩家免受狼人袭击（不可连守）</li>
-                  <li><b>狼人</b>：共同选择一名玩家击杀</li>
-                  <li><b>预言家</b>：查验一名玩家身份</li>
-                  <li><b>女巫</b>：使用解药救人或毒药杀人</li>
+                  <li><b>好人胜</b>：所有狼人（含白狼王）全部死亡</li>
+                  <li><b>狼人胜</b>：所有平民死亡 或 所有神职死亡（满足任一即可）</li>
                 </ul>
               </section>
               <section>
-                <h3 className="font-bold text-amber-200 mb-1.5">☀️ 白天阶段</h3>
-                <p>第一天白天先竞选警长（上警发言→投票），再公布死讯。死亡玩家依次发言讨论，随后投票放逐一人。</p>
-              </section>
-              <section>
-                <h3 className="font-bold text-amber-200 mb-1.5">🏛️ 警长与遗言</h3>
+                <h3 className="font-bold text-amber-200 mb-1.5">🌙 夜晚行动顺序</h3>
                 <ul className="space-y-1 list-disc pl-4">
-                  <li><b>警长</b>：1.5票投票权，决定发言顺序</li>
-                  <li><b>遗言</b>：第一天夜里死亡有遗言，被投票出局有遗言</li>
-                  <li>后续夜里死亡无遗言</li>
+                  <li>1. <b>狼人</b>：共同选择一名玩家击杀</li>
+                  <li>2. <b>守卫</b>：守护一人（可守自己可空守，<b>不可连守同一人</b>）</li>
+                  <li>3. <b>女巫</b>：得知狼刀目标，可选解药/毒药（<b>同晚只能用一瓶</b>，首夜可自救）</li>
+                  <li>4. <b>预言家</b>：查验一名玩家阵营（好人/狼人，不返回职业）</li>
                 </ul>
               </section>
               <section>
-                <h3 className="font-bold text-amber-200 mb-1.5">⚔️ 特殊角色</h3>
+                <h3 className="font-bold text-amber-200 mb-1.5">⚖️ 关键判定</h3>
                 <ul className="space-y-1 list-disc pl-4">
-                  <li><b>猎人</b>：死亡时可开枪带走一人（被毒杀除外）</li>
-                  <li><b>白狼王</b>：白天可自爆带走一人并进入黑夜</li>
-                  <li><b>骑士</b>：白天可挑战一人，错则殉职</li>
+                  <li><b>同守同救死亡</b>：守卫守护 + 女巫解救同一人，该玩家死亡</li>
+                  <li><b>猎人开枪条件</b>：被狼刀或被放逐可开枪；<b>被毒杀/被白狼王自爆带走不能开枪</b></li>
+                  <li><b>白狼王自爆</b>：白天主动自爆带走一人，立即进入黑夜，自爆者无遗言</li>
                 </ul>
               </section>
               <section>
-                <h3 className="font-bold text-amber-200 mb-1.5">🏆 胜负判定</h3>
+                <h3 className="font-bold text-amber-200 mb-1.5">☀️ 白天流程</h3>
                 <ul className="space-y-1 list-disc pl-4">
-                  <li>狼人全灭 → 好人胜</li>
-                  <li>狼人≥好人 → 狼人胜</li>
+                  <li>1. 第一天先<b>竞选警长</b>：上警 → 候选人发言 → 警下玩家投票</li>
+                  <li>2. 公布夜间死讯（不公布死因和身份）</li>
+                  <li>3. 警长决定发言顺序（警左/警右/死左/死右）</li>
+                  <li>4. 所有存活玩家依次发言一轮</li>
+                  <li>5. 投票放逐（警长票计 1.5 票），平票进入 PK，二次平票无人出局</li>
                 </ul>
+              </section>
+              <section>
+                <h3 className="font-bold text-amber-200 mb-1.5">🏛️ 警徽与遗言</h3>
+                <ul className="space-y-1 list-disc pl-4">
+                  <li><b>警长</b>：1.5 票投票权，决定发言顺序；死亡时需移交警徽或撕毁</li>
+                  <li><b>有遗言</b>：第一晚死亡、白天被放逐</li>
+                  <li><b>无遗言</b>：被女巫毒杀、被猎人枪杀、被白狼王自爆带走、后续夜晚死亡</li>
+                </ul>
+              </section>
+              <section>
+                <h3 className="font-bold text-amber-200 mb-1.5">🤖 AI 视角隔离</h3>
+                <p>AI 决策严格基于"公开信息+自身身份及技能信息"，<b>不知晓其他玩家真实身份</b>。AI 内部维护对其他玩家的信任度评分（0-100），按难度（简单/普通/困难）展现不同行为逻辑。</p>
               </section>
               <section>
                 <h3 className="font-bold text-amber-200 mb-1.5">🎙️ 语音发言</h3>

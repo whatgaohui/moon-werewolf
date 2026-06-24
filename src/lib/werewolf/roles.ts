@@ -1,15 +1,15 @@
 import { RoleDef, RoleId } from './types'
 
-// 角色定义表
+// 角色定义表 (v2.0 §8 职业规则详解)
 export const ROLES: Record<RoleId, RoleDef> = {
   wolf: {
     id: 'wolf',
-    name: '狼人',
+    name: '普通狼人',
     emoji: '🐺',
     faction: 'wolf',
     category: 'wolf',
     color: 'from-red-500 to-rose-700',
-    description: '每晚与同伴一起选择一名玩家击杀。白天伪装成好人，误导投票。',
+    description: '每晚与同伴一起选择一名玩家击杀。白天可自爆终止白天流程并进入黑夜。',
     nightAction: true,
     actionPrompt: '请选择今晚要击杀的玩家',
   },
@@ -20,7 +20,7 @@ export const ROLES: Record<RoleId, RoleDef> = {
     faction: 'wolf',
     category: 'wolf',
     color: 'from-rose-600 to-red-900',
-    description: '拥有狼人能力。白天可自爆带走一名玩家，并立即进入黑夜。',
+    description: '拥有狼人能力。白天可主动自爆带走一名存活玩家，并立即进入黑夜（仅白天自爆有效）。',
     nightAction: true,
     actionPrompt: '请选择今晚要击杀的玩家',
   },
@@ -31,7 +31,7 @@ export const ROLES: Record<RoleId, RoleDef> = {
     faction: 'good',
     category: 'god',
     color: 'from-violet-500 to-purple-700',
-    description: '每晚可查验一名玩家的身份，得知其是好人还是狼人。',
+    description: '每晚查验一名玩家阵营（好人/狼人），不返回具体职业。AI 预言家首日上警并报查验+警徽流。',
     nightAction: true,
     actionPrompt: '请选择今晚要查验的玩家',
   },
@@ -42,7 +42,7 @@ export const ROLES: Record<RoleId, RoleDef> = {
     faction: 'good',
     category: 'god',
     color: 'from-emerald-500 to-teal-700',
-    description: '拥有一瓶解药和一瓶毒药。解药可救活当晚被杀者，毒药可毒杀一名玩家。',
+    description: '一瓶解药救狼刀目标，一瓶毒药毒人。首夜可自救。同一晚默认只能使用一瓶药。',
     nightAction: true,
     actionPrompt: '是否使用药剂？',
   },
@@ -53,7 +53,7 @@ export const ROLES: Record<RoleId, RoleDef> = {
     faction: 'good',
     category: 'god',
     color: 'from-amber-500 to-orange-700',
-    description: '被狼人杀死或被投票出局时，可开枪带走一名玩家。被女巫毒杀则无法开枪。',
+    description: '被狼刀或被投票放逐死亡时可开枪带走一人。被女巫毒杀、被白狼王自爆带走等方式死亡时不能开枪。',
     nightAction: false,
   },
   guard: {
@@ -63,19 +63,9 @@ export const ROLES: Record<RoleId, RoleDef> = {
     faction: 'good',
     category: 'god',
     color: 'from-sky-500 to-blue-700',
-    description: '每晚守护一名玩家，使其免受狼人袭击。不能连续两晚守护同一人。',
+    description: '每晚守护一人免于狼刀，可守自己可空守，不能连续两晚守同一人。同守同救=死亡。',
     nightAction: true,
     actionPrompt: '请选择今晚要守护的玩家',
-  },
-  knight: {
-    id: 'knight',
-    name: '骑士',
-    emoji: '⚔️',
-    faction: 'good',
-    category: 'god',
-    color: 'from-cyan-500 to-sky-700',
-    description: '白天可随时亮明身份挑战一名玩家。若对方是狼人则其死亡，否则骑士殉职。',
-    nightAction: false,
   },
   villager: {
     id: 'villager',
@@ -84,16 +74,16 @@ export const ROLES: Record<RoleId, RoleDef> = {
     faction: 'good',
     category: 'villager',
     color: 'from-slate-400 to-slate-600',
-    description: '没有特殊能力。依靠白天的观察和投票找出狼人。',
+    description: '无技能，通过发言和投票找狼。AI 平民不主动穿神衣服（除非高级局挡刀）。',
     nightAction: false,
   },
 }
 
-// 角色顺序（夜晚行动顺序）
-export const NIGHT_ACTION_ORDER: RoleId[] = ['guard', 'wolf', 'seer', 'witch']
+// 夜晚行动顺序 (v2.0 §6.1)：狼人 → 守卫 → 女巫 → 预言家
+export const NIGHT_ACTION_ORDER: RoleId[] = ['wolf', 'guard', 'witch', 'seer']
 
-// 好人神职列表
-export const GOD_ROLES: RoleId[] = ['seer', 'witch', 'hunter', 'guard', 'knight']
+// 好人神职列表（用于屠神判定）
+export const GOD_ROLES: RoleId[] = ['seer', 'witch', 'hunter', 'guard']
 
 // AI 玩家昵称池
 export const AI_NAMES = [
