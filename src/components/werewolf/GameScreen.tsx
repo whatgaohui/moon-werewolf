@@ -29,7 +29,11 @@ const PHASE_INFO: Record<GamePhase, { label: string; icon: any; desc: string; is
   'night-seer': { label: '预言家行动', icon: Eye, desc: '预言家请睁眼', isNight: true },
   'night-witch': { label: '女巫行动', icon: FlaskConical, desc: '女巫请睁眼', isNight: true },
   'night-end': { label: '天亮结算', icon: Sun, desc: '正在结算...', isNight: true },
+  'day-sheriff-announce': { label: '警长竞选', icon: Sun, desc: '开始竞选警长', isNight: false },
+  'day-sheriff-campaign': { label: '竞选发言', icon: Sun, desc: '候选人发言中', isNight: false },
+  'day-sheriff-vote': { label: '警长投票', icon: Sun, desc: '投票选警长', isNight: false },
   'day-announce': { label: '公布死讯', icon: Sun, desc: '天亮了', isNight: false },
+  'day-lastwords': { label: '临终遗言', icon: Sun, desc: '死者遗言', isNight: false },
   'day-discuss': { label: '白天讨论', icon: ScrollText, desc: '依次发言', isNight: false },
   'day-vote': { label: '投票放逐', icon: Target, desc: '请投票', isNight: false },
   'day-result': { label: '投票结果', icon: Sun, desc: '公布结果', isNight: false },
@@ -67,16 +71,33 @@ export function GameScreen() {
 
   // 判断用户是否需要行动
   const userAction = useMemo(() => {
-    if (!user || !user.isAlive) return null
+    if (!user || !user.isAlive) {
+      // 死亡用户在遗言阶段可发言
+      if (phase === 'day-lastwords' && state.lastWordsPending.includes(userPlayerId)) return 'lastwords'
+      return null
+    }
     if (phase === 'night-guard' && user.role === 'guard') return 'guard'
     if (phase === 'night-wolf' && isWolf(user.role)) return 'wolf'
     if (phase === 'night-seer' && user.role === 'seer') return 'seer'
     if (phase === 'night-witch' && user.role === 'witch') return 'witch'
+    if (phase === 'day-sheriff-campaign' && !state.sheriffCandidates.includes(userPlayerId)) {
+      // 用户还没决定是否上警
+      const alive = state.players.filter((p) => p.isAlive)
+      const userIdx = alive.findIndex((p) => p.id === userPlayerId)
+      // 简化：如果还没决定且轮到用户，显示上警选择
+      if (state.sheriffCampaignIdx === 0) return 'sheriff-join'
+    }
+    if (phase === 'day-sheriff-campaign' && state.sheriffCandidates.includes(userPlayerId) && state.sheriffCandidates[state.sheriffCampaignIdx] === userPlayerId) return 'sheriff-speak'
+    if (phase === 'day-sheriff-vote' && !state.sheriffCandidates.includes(userPlayerId)) {
+      const voted = state.sheriffVotes.some((v) => v.voterId === userPlayerId)
+      if (!voted) return 'sheriff-vote'
+    }
+    if (phase === 'day-lastwords' && state.lastWordsPending[0] === userPlayerId) return 'lastwords'
     if (phase === 'day-discuss' && currentSpeaker === user.id) return 'speak'
     if (phase === 'day-vote') return 'vote'
     if (phase === 'hunter-shoot' && state.hunterPending === user.id) return 'hunter'
     return null
-  }, [phase, user, currentSpeaker, state.hunterPending])
+  }, [phase, user, currentSpeaker, state.hunterPending, state.sheriffCandidates, state.sheriffCampaignIdx, state.sheriffVotes, state.lastWordsPending, userPlayerId])
 
   // 可选择目标
   const selectableTargets = useMemo((): Player[] => {
@@ -92,46 +113,22 @@ export function GameScreen() {
       return alive.filter((p) => p.id !== user.id)
     }
     if (userAction === 'witch') {
-      // 毒杀目标
       return alive.filter((p) => p.id !== user.id)
     }
     if (userAction === 'vote') {
       return alive.filter((p) => p.id !== user.id)
     }
+    if (userAction === 'sheriff-vote') {
+      return alive.filter((p) => state.sheriffCandidates.includes(p.id))
+    }
     if (userAction === 'hunter') {
       return alive
     }
     return []
-  }, [userAction, players, user, lastGuardTarget])
-
-  const handleConfirm = () => {
-    if (userAction === 'guard') {
-      state.userNightAction({ guardTarget: selectedTarget ?? undefined })
-    } else if (userAction === 'wolf') {
-      state.userNightAction({ wolfTarget: selectedTarget ?? undefined })
-    } else if (userAction === 'seer') {
-      if (selectedTarget !== null) state.userNightAction({ seerTarget: selectedTarget })
-    } else if (userAction === 'witch') {
-      state.userNightAction({
-        witchSave: witchSave === true,
-        witchPoisonTarget: witchPoison ?? undefined,
-      })
-    } else if (userAction === 'vote') {
-      state.userVote(selectedTarget)
-    } else if (userAction === 'hunter') {
-      state.userHunterShoot(selectedTarget)
-    }
-  }
-
-  const handleSpeak = () => {
-    const text = speakText.trim()
-    if (!text) return
-    state.userSpeak(text)
-    setSpeakText('')
-  }
+  }, [userAction, players, user, lastGuardTarget, state.sheriffCandidates])
 
   const canConfirm = useMemo(() => {
-    if (userAction === 'guard' || userAction === 'wolf' || userAction === 'seer' || userAction === 'vote' || userAction === 'hunter') {
+    if (userAction === 'guard' || userAction === 'wolf' || userAction === 'seer' || userAction === 'vote' || userAction === 'hunter' || userAction === 'sheriff-vote') {
       return selectedTarget !== null
     }
     if (userAction === 'witch') {
@@ -149,6 +146,46 @@ export function GameScreen() {
 
   // 当前发言玩家
   const speaker = currentSpeaker !== null ? players.find((p) => p.id === currentSpeaker) : null
+
+  const handleConfirm = () => {
+    if (userAction === 'guard') {
+      state.userNightAction({ guardTarget: selectedTarget ?? undefined })
+    } else if (userAction === 'wolf') {
+      state.userNightAction({ wolfTarget: selectedTarget ?? undefined })
+    } else if (userAction === 'seer') {
+      if (selectedTarget !== null) state.userNightAction({ seerTarget: selectedTarget })
+    } else if (userAction === 'witch') {
+      state.userNightAction({
+        witchSave: witchSave === true,
+        witchPoisonTarget: witchPoison ?? undefined,
+      })
+    } else if (userAction === 'vote' || userAction === 'sheriff-vote') {
+      state.userVote(selectedTarget)
+    } else if (userAction === 'hunter') {
+      state.userHunterShoot(selectedTarget)
+    }
+  }
+
+  const handleSpeak = () => {
+    const text = speakText.trim()
+    if (!text) return
+    state.userSpeak(text)
+    setSpeakText('')
+  }
+
+  const handleSheriffSpeak = () => {
+    const text = speakText.trim()
+    if (!text) return
+    state.userSpeak(text)
+    setSpeakText('')
+  }
+
+  const handleLastWords = () => {
+    const text = speakText.trim()
+    if (!text) return
+    state.userLastWords(text)
+    setSpeakText('')
+  }
 
   return (
     <div className="relative min-h-screen flex flex-col overflow-hidden">
@@ -248,8 +285,8 @@ export function GameScreen() {
                   selectable={isSelectable && !processing}
                   selected={isSelected || isWitchPoisonTarget}
                   showRole={isUser || isWolfTeammate || winner !== null}
-                  badge={isCurrentSpeaker ? '发言中' : isWolfTeammate ? '同伴' : undefined}
-                  badgeColor={isCurrentSpeaker ? 'bg-amber-400' : 'bg-red-500'}
+                  badge={isCurrentSpeaker ? '发言中' : p.id === state.sheriffId ? '警长' : isWolfTeammate ? '同伴' : undefined}
+                  badgeColor={isCurrentSpeaker ? 'bg-amber-400' : p.id === state.sheriffId ? 'bg-violet-500' : 'bg-red-500'}
                   highlightRing={isCurrentSpeaker ? 'gold' : isSelected ? 'gold' : isWitchPoisonTarget ? 'red' : null}
                   onClick={() => {
                     if (!isSelectable || processing) return
@@ -264,23 +301,18 @@ export function GameScreen() {
             })}
           </div>
 
-          {/* 白天讨论区 */}
-          {(phase === 'day-discuss' || phase === 'day-vote' || phase === 'day-result' || phase === 'day-announce') && (
+          {/* 白天讨论区（含警长竞选、遗言） */}
+          {(phase === 'day-discuss' || phase === 'day-vote' || phase === 'day-result' || phase === 'day-announce' || phase === 'day-sheriff-campaign' || phase === 'day-sheriff-vote' || phase === 'day-lastwords' || phase === 'day-sheriff-announce') && speeches.length > 0 && (
             <div className="mt-3 glass-card rounded-2xl p-2 max-h-52 overflow-hidden">
               <div className="flex items-center justify-between px-1 pb-1.5">
                 <span className="text-xs text-amber-200/70 flex items-center gap-1">
                   <ScrollText className="w-3 h-3" />
-                  讨论记录
+                  {phase === 'day-lastwords' ? '遗言' : phase.startsWith('day-sheriff') ? '竞选发言' : '讨论记录'}
                 </span>
-                <span className="text-[10px] text-amber-100/40">{speeches.length}条发言</span>
+                <span className="text-[10px] text-amber-100/40">{speeches.length}条</span>
               </div>
               <ScrollArea className="h-40 scrollbar-thin">
                 <div className="space-y-1.5 px-1">
-                  {speeches.length === 0 && phase === 'day-discuss' && (
-                    <div className="text-center text-xs text-amber-100/40 py-4">
-                      {speaker ? `${speaker.name}(${speaker.id}号) 即将发言...` : '等待发言...'}
-                    </div>
-                  )}
                   {speeches.map((s, i) => {
                     const sp = players.find((p) => p.id === s.playerId)
                     return (
@@ -310,6 +342,22 @@ export function GameScreen() {
                   })}
                 </div>
               </ScrollArea>
+            </div>
+          )}
+
+          {/* 警长竞选投票记录 */}
+          {phase === 'day-sheriff-vote' && state.sheriffVotes.length > 0 && (
+            <div className="mt-2 glass-card rounded-2xl p-2">
+              <div className="text-xs text-amber-200/70 px-1 pb-1.5 flex items-center gap-1">
+                <Target className="w-3 h-3" /> 警长投票 ({state.sheriffVotes.length})
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {state.sheriffVotes.map((v, i) => (
+                  <Badge key={i} variant="secondary" className="text-[10px] glass-card">
+                    {v.voterName}→{v.targetName || '弃票'}
+                  </Badge>
+                ))}
+              </div>
             </div>
           )}
 
@@ -356,6 +404,200 @@ export function GameScreen() {
                     <span>等待其他玩家行动...</span>
                   )}
                 </div>
+              </motion.div>
+            )}
+
+            {/* 警长竞选：是否上警 */}
+            {userAction === 'sheriff-join' && (
+              <motion.div
+                key="sheriff-join"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                className="space-y-2"
+              >
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-700 flex items-center justify-center">
+                    <span className="text-base">🏛️</span>
+                  </div>
+                  <div>
+                    <div className="text-sm font-bold text-amber-100">是否竞选警长？</div>
+                    <div className="text-[10px] text-amber-100/50">警长拥有1.5票投票权，决定发言顺序</div>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    onClick={() => state.userJoinSheriff(true)}
+                    disabled={processing}
+                    className="flex-1 h-11 rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 text-white font-bold disabled:opacity-40"
+                  >
+                    🏛️ 上警
+                  </Button>
+                  <Button
+                    onClick={() => state.userJoinSheriff(false)}
+                    variant="outline"
+                    disabled={processing}
+                    className="flex-1 h-11 rounded-xl glass-card"
+                  >
+                    不上警
+                  </Button>
+                </div>
+              </motion.div>
+            )}
+
+            {/* 警长竞选发言 */}
+            {userAction === 'sheriff-speak' && (
+              <motion.div
+                key="sheriff-speak"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                className="space-y-2"
+              >
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-700 flex items-center justify-center">
+                    <span className="text-base">🏛️</span>
+                  </div>
+                  <div className="text-sm font-bold text-amber-100">请发表竞选演讲</div>
+                </div>
+                <div className="flex gap-2 items-end">
+                  <VoiceInput
+                    onTranscript={(t) => setSpeakText((cur) => (cur ? cur + ' ' : '') + t)}
+                    disabled={processing}
+                  />
+                  <Textarea
+                    value={speakText}
+                    onChange={(e) => setSpeakText(e.target.value)}
+                    placeholder="说明你上警的理由，表明身份..."
+                    className="flex-1 min-h-[44px] max-h-24 resize-none glass-card border-amber-300/20 text-amber-100 placeholder:text-amber-100/40"
+                    rows={1}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault()
+                        handleSheriffSpeak()
+                      }
+                    }}
+                  />
+                  <Button
+                    onClick={handleSheriffSpeak}
+                    disabled={!speakText.trim() || processing}
+                    size="icon"
+                    className="h-11 w-11 rounded-full bg-gradient-to-r from-violet-500 to-purple-600 text-white disabled:opacity-40"
+                  >
+                    <Send className="w-4 h-4" />
+                  </Button>
+                </div>
+                <Button
+                  onClick={() => state.skipSpeak()}
+                  variant="ghost"
+                  size="sm"
+                  disabled={processing}
+                  className="w-full h-8 text-xs text-amber-100/50"
+                >
+                  <SkipForward className="w-3 h-3 mr-1" />
+                  跳过发言
+                </Button>
+              </motion.div>
+            )}
+
+            {/* 警长竞选投票 */}
+            {userAction === 'sheriff-vote' && (
+              <motion.div
+                key="sheriff-vote"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                className="space-y-2"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-700 flex items-center justify-center">
+                      <Target className="w-4 h-4 text-white" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-bold text-amber-100">投票选警长</div>
+                      <div className="text-[10px] text-amber-100/50">
+                        {selectedTarget !== null ? `投票给 ${selectedTarget}号` : '选择候选人'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    onClick={() => state.userSheriffVote(null)}
+                    variant="outline"
+                    disabled={processing}
+                    className="flex-1 h-11 rounded-xl glass-card"
+                  >
+                    <X className="w-4 h-4 mr-1" />弃票
+                  </Button>
+                  <Button
+                    onClick={handleConfirm}
+                    disabled={!canConfirm || processing}
+                    className="flex-1 h-11 rounded-xl bg-gradient-to-r from-violet-500 to-purple-600 text-white font-bold disabled:opacity-40"
+                  >
+                    <Check className="w-4 h-4 mr-1" />
+                    确认投票
+                  </Button>
+                </div>
+              </motion.div>
+            )}
+
+            {/* 死亡遗言 */}
+            {userAction === 'lastwords' && (
+              <motion.div
+                key="lastwords"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 10 }}
+                className="space-y-2"
+              >
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-rose-500 to-red-700 flex items-center justify-center">
+                    <Skull className="w-4 h-4 text-white" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-bold text-amber-100">你已死亡，请发表遗言</div>
+                    <div className="text-[10px] text-amber-100/50">留下最后的线索或祝福</div>
+                  </div>
+                </div>
+                <div className="flex gap-2 items-end">
+                  <VoiceInput
+                    onTranscript={(t) => setSpeakText((cur) => (cur ? cur + ' ' : '') + t)}
+                    disabled={processing}
+                  />
+                  <Textarea
+                    value={speakText}
+                    onChange={(e) => setSpeakText(e.target.value)}
+                    placeholder="留下你的遗言..."
+                    className="flex-1 min-h-[44px] max-h-24 resize-none glass-card border-amber-300/20 text-amber-100 placeholder:text-amber-100/40"
+                    rows={1}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault()
+                        handleLastWords()
+                      }
+                    }}
+                  />
+                  <Button
+                    onClick={handleLastWords}
+                    disabled={!speakText.trim() || processing}
+                    size="icon"
+                    className="h-11 w-11 rounded-full bg-gradient-to-r from-rose-500 to-red-600 text-white disabled:opacity-40"
+                  >
+                    <Send className="w-4 h-4" />
+                  </Button>
+                </div>
+                <Button
+                  onClick={() => state.skipLastWords()}
+                  variant="ghost"
+                  size="sm"
+                  disabled={processing}
+                  className="w-full h-8 text-xs text-amber-100/50"
+                >
+                  <SkipForward className="w-3 h-3 mr-1" />
+                  不留遗言
+                </Button>
               </motion.div>
             )}
 

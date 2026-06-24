@@ -150,7 +150,15 @@ export function MenuScreen() {
               </section>
               <section>
                 <h3 className="font-bold text-amber-200 mb-1.5">☀️ 白天阶段</h3>
-                <p>公布昨晚死亡情况，存活玩家依次发言讨论，随后投票放逐一人。</p>
+                <p>第一天白天先竞选警长（上警发言→投票），再公布死讯。死亡玩家依次发言讨论，随后投票放逐一人。</p>
+              </section>
+              <section>
+                <h3 className="font-bold text-amber-200 mb-1.5">🏛️ 警长与遗言</h3>
+                <ul className="space-y-1 list-disc pl-4">
+                  <li><b>警长</b>：1.5票投票权，决定发言顺序</li>
+                  <li><b>遗言</b>：第一天夜里死亡有遗言，被投票出局有遗言</li>
+                  <li>后续夜里死亡无遗言</li>
+                </ul>
               </section>
               <section>
                 <h3 className="font-bold text-amber-200 mb-1.5">⚔️ 特殊角色</h3>

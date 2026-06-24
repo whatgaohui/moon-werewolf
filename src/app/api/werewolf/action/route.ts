@@ -12,7 +12,7 @@ interface AIPlayer {
 }
 
 interface RequestBody {
-  action: 'night-wolf' | 'night-seer' | 'night-witch' | 'night-guard' | 'day-speak' | 'day-vote' | 'hunter-shoot'
+  action: 'night-wolf' | 'night-seer' | 'night-witch' | 'night-guard' | 'day-speak' | 'day-vote' | 'hunter-shoot' | 'sheriff-campaign' | 'sheriff-vote' | 'last-words'
   playerId: number
   players: AIPlayer[]
   day: number
@@ -23,6 +23,7 @@ interface RequestBody {
   wolfTarget?: number
   canSave?: boolean
   canPoison?: boolean
+  candidates?: number[]
 }
 
 const ROLE_NAMES: Record<string, string> = {
@@ -185,6 +186,43 @@ ${roleHint}
 请投票。返回JSON：{"targetId": 数字或null}，null表示弃票。`
   }
 
+  if (action === 'sheriff-campaign') {
+    const candidates = body.candidates || []
+    return `${base}
+
+今天是第一天，正在进行警长竞选。你已上警，需要发表竞选演讲。
+其他候选人：${candidates.filter((id) => id !== body.playerId).map((id) => `${id}号`).join('、') || '暂无'}
+
+${isWolfRole(myRole) ? '你是狼人，上警可能是为了悍跳预言家或争夺警徽误导好人。' : myRole === 'seer' ? '你是预言家，应该跳预言家并报出昨晚查验结果，争取警徽。' : '你是好人，说明你上警的理由，争取大家信任。'}
+
+请发表20-50字的竞选演讲，表明立场。只返回发言文本。`
+  }
+
+  if (action === 'sheriff-vote') {
+    const candidates = body.candidates || []
+    const candidateNames = candidates.map((id) => `${id}号(${body.players.find((p) => p.id === id)?.name})`).join('、')
+    return `${base}
+
+现在是警长竞选投票环节，你未上警，需要投票选出警长。
+候选人：${candidateNames}
+
+之前的竞选发言：
+${(body.speeches || []).map((s) => `${s.playerId}号：${s.content}`).join('\n') || '（无发言）'}
+
+${isWolfRole(myRole) ? '你是狼人，把票投给狼同伴或有利于狼人的候选人。' : '你是好人，把票投给你认为最可信的候选人（通常是真预言家）。'}
+
+请返回JSON：{"targetId": 数字}，targetId为候选人id。`
+  }
+
+  if (action === 'last-words') {
+    return `${base}
+
+你已死亡，现在发表临终遗言。
+${isWolfRole(myRole) ? '你是狼人，遗言可以误导好人或指认同伴。' : myRole === 'seer' ? '你是预言家，遗言应报出你的查验结果，帮助好人。' : '你是好人，遗言可以表达你的怀疑或祝福。'}
+
+请发表20-60字的遗言。只返回发言文本。`
+  }
+
   if (action === 'hunter-shoot') {
     const targets = body.players.filter((p) => p.alive)
     return `${base}
@@ -286,6 +324,36 @@ function fallbackDecision(action: string, body: RequestBody): any {
   if (action === 'day-vote') {
     return { targetId: null }
   }
+  if (action === 'sheriff-vote') {
+    const candidates = body.candidates || []
+    const valid = candidates.filter((id) => {
+      const p = body.players.find((pp) => pp.id === id)
+      return p && p.alive
+    })
+    return { targetId: valid.length > 0 ? valid[Math.floor(Math.random() * valid.length)] : null }
+  }
+  if (action === 'sheriff-campaign') {
+    const me = body.players.find((p) => p.id === body.playerId)
+    const role = me?.role
+    if (role && isWolfRole(role)) {
+      return { content: '我上警是想为大家服务，希望大家支持我，我会带领好人找出狼人。' }
+    }
+    if (role === 'seer') {
+      return { content: '我是预言家！昨晚我查验了一个人，我有重要信息要告诉大家，请把警徽给我。' }
+    }
+    return { content: '我上警是为了找出狼人，请大家相信我，我会认真分析每个人的发言。' }
+  }
+  if (action === 'last-words') {
+    const me = body.players.find((p) => p.id === body.playerId)
+    const role = me?.role
+    if (role && isWolfRole(role)) {
+      return { content: '我是好人...大家要小心，狼人很狡猾...' }
+    }
+    if (role === 'seer') {
+      return { content: '我是预言家，我的查验结果都在发言里了，请大家相信我...咳咳...' }
+    }
+    return { content: '我是好人，希望大家能找出真正的狼人，替我报仇...' }
+  }
   if (action === 'hunter-shoot') {
     return { targetId: null }
   }
@@ -301,8 +369,8 @@ export async function POST(req: NextRequest) {
     const me = players.find((p) => p.id === playerId)
 
     let userPrompt = ''
-    if (action === 'day-speak') {
-      userPrompt = `请以 ${playerId}号(${me?.name}) 的身份发言，第${day}天白天。直接输出发言内容（30-80字，自然口语）。`
+    if (action === 'day-speak' || action === 'sheriff-campaign' || action === 'last-words') {
+      userPrompt = `请以 ${playerId}号(${me?.name}) 的身份发言，第${day}天。直接输出发言内容（自然口语）。`
     } else {
       userPrompt = '请返回JSON决策。'
     }
@@ -330,7 +398,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(fallbackDecision(action, body))
     }
 
-    if (action === 'day-speak') {
+    if (action === 'day-speak' || action === 'sheriff-campaign' || action === 'last-words') {
       const cleanContent = content
         .replace(/^["'""]+|["'""]+$/g, '')
         .replace(/^.*?[：:]\s*/s, '')

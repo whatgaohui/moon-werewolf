@@ -77,7 +77,11 @@ export type GamePhase =
   | 'night-witch'      // 女巫行动
   | 'night-guard'      // 守卫行动
   | 'night-end'        // 黑夜结束结算
-  | 'day-announce'     // 白天公布
+  | 'day-sheriff-announce' // 警长竞选公告（仅第一天）
+  | 'day-sheriff-campaign' // 警长竞选发言
+  | 'day-sheriff-vote'     // 警长竞选投票
+  | 'day-announce'     // 白天公布死讯（含遗言）
+  | 'day-lastwords'    // 死亡遗言
   | 'day-discuss'      // 白天讨论
   | 'day-vote'         // 白天投票
   | 'day-result'       // 投票结果
@@ -125,6 +129,8 @@ export interface WerewolfGameState {
   speeches: Speech[]
   votes: VoteRecord[]
   currentSpeaker: number | null  // 当前发言玩家id
+  speakStartIdx: number | null   // 本轮发言起始索引（用于绕回判断）
+  speakCount: number             // 本轮已发言人数
   winner: Faction | null
   // 临时状态
   witchAntidoteUsed: boolean  // 女巫解药已用
@@ -134,6 +140,13 @@ export interface WerewolfGameState {
   killedThisNight: number[]   // 本夜死亡(结算前)
   speaking: boolean           // AI正在发言中
   processing: boolean         // 引擎处理中
+  // 警长相关
+  sheriffId: number | null           // 当前警长id
+  sheriffCandidates: number[]        // 上警玩家id列表
+  sheriffVotes: VoteRecord[]         // 警长竞选投票
+  sheriffCampaignIdx: number         // 警长竞选发言进度
+  lastWordsPending: number[]         // 待发表遗言的玩家id队列
+  _aiSheriffDecided: boolean         // AI上警决定已收集（内部）
   // 弹窗/提示状态
   seerResultPending: { targetId: number; targetName: string; result: 'wolf' | 'good' } | null // 待展示的查验结果
   toast: { id: string; content: string; type: 'info' | 'success' | 'danger' } | null // 临时提示

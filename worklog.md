@@ -463,3 +463,67 @@ Stage Summary:
 - dev server 现在持久运行, 自动重启, 用户可随时通过 Preview Panel 访问
 - subshell-orphan 技术彻底解决沙箱进程清理问题
 - 游戏 UI 完整可玩
+
+---
+Task ID: 20 (修复游戏流程三大问题)
+Agent: 主代理 (Z.ai Code)
+Task: 修复用户反馈的3个流程问题：警长竞选+遗言、发言后直接投票、第三天预言家卡死
+
+Work Log:
+- 【联网搜索】搜索狼人杀官方规则，确认：
+  - 第一天白天先竞选警长(上警→发言→投票)，再公布死讯
+  - 警长有1.5票投票权，决定发言顺序
+  - 第一天夜里死亡有遗言，被投票出局有遗言，后续夜里死亡无遗言
+
+- 【问题2修复】白天发言绕回机制：
+  原bug: alive[idx+1] 到末尾就停，startIdx之前的玩家不发言；
+  用户若是最后一个发言者，发言完直接投票，前面的玩家没发言。
+  修复: 用 speakCount 计数 + (idx+1)%alive.length 绕回，
+  所有人发言一次后才进入投票。警长决定起始发言位(警长右边)。
+
+- 【问题3修复】夜晚流程 try/catch 防御：
+  原bug: proceedNightPhase 无 try/catch，任何异常(如AI返回解析错误)
+  会导致 processing 标志卡在 true，后续所有 proceedNightPhase 调用
+  被 if(state.processing)return 挡住，流程永久卡死。
+  修复: 整个函数体包裹 try/catch/finally，catch 中
+  set({processing:false, speaking:false}) 重置状态。
+  proceedDayPhase 同样加 try/catch。
+  另修复 confirmSeerResult 硬编码 nextPhase 的冗余逻辑。
+
+- 【问题1实现】警长竞选 + 死亡遗言机制：
+  types.ts: 新增5个阶段(day-sheriff-announce/campaign/vote, day-lastwords)
+            新增6个状态字段(sheriffId, sheriffCandidates, sheriffVotes等)
+  store.ts: 
+    - 第一天夜晚结算后进入 day-sheriff-announce → day-sheriff-campaign
+    - AI 按角色概率上警(预言家90%/狼人60%/女巫40%/猎人30%等)
+    - 候选人依次发表竞选演讲(AI生成)，未上警玩家投票选警长
+    - 警长1.5票投票权，投票详情日志标注"(警长1.5票)"
+    - 第一天夜里死亡 → day-lastwords 遗言阶段(AI/用户发言)
+    - 被投票出局 → day-lastwords 遗言阶段
+    - 后续夜里死亡无遗言
+  API route: 新增 sheriff-campaign/sheriff-vote/last-words 3个action
+             对应system prompt + fallback决策
+  GameScreen.tsx:
+    - PHASE_INFO 新增5个阶段描述
+    - userAction 新增 sheriff-join/sheriff-speak/sheriff-vote/lastwords
+    - 新增4个底部操作面板(上警选择/竞选发言/警长投票/遗言输入)
+    - 玩家头像显示"警长"徽章(紫色)
+    - 讨论区适配竞选发言和遗言展示
+  MenuScreen.tsx: 规则说明新增"警长与遗言"章节
+
+- 【验证】agent-browser 端到端测试：
+  ✓ 菜单→设置→角色揭晓(平民)→进入游戏
+  ✓ 第一天夜晚后进入警长竞选阶段，显示"上警/不上警"按钮
+  ✓ 点击上警→显示竞选发言面板(语音/文字/跳过)
+  ✓ 跳过后AI候选人依次发言，投票选出警长(5号当选，显示警长徽章)
+  ✓ 第一天死亡遗言阶段正常
+  ✓ 白天讨论: 用户发言后3号继续发言(不再直接投票)，所有人发言完才投票
+  ✓ 投票阶段显示"弃票/确认投票"，警长在场
+  ✓ AI API 全部返回200，0控制台错误，0运行时错误
+
+Stage Summary:
+- 警长竞选流程完整(上警→发言→投票→警长1.5票)
+- 死亡遗言机制(首夜死亡+投票出局有遗言)
+- 发言绕回修复(所有人发言一次后才投票)
+- 夜晚/白天流程 try/catch 防御(彻底解决卡死)
+- 游戏流程符合狼人杀官方标准规则

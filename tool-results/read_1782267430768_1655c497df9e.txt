@@ -1,0 +1,625 @@
+     1→'use client'
+     2→
+     3→import { useWerewolfStore } from '@/lib/werewolf/store'
+     4→import { Player, GamePhase } from '@/lib/werewolf/types'
+     5→import { ROLES, isWolf } from '@/lib/werewolf/roles'
+     6→import { PlayerAvatar } from './PlayerAvatar'
+     7→import { GameLog } from './GameLog'
+     8→import { VoiceInput } from './VoiceInput'
+     9→import { SeerResultDialog } from './SeerResultDialog'
+    10→import { ToastTip } from './ToastTip'
+    11→import { Button } from '@/components/ui/button'
+    12→import { Badge } from '@/components/ui/badge'
+    13→import { Textarea } from '@/components/ui/textarea'
+    14→import { ScrollArea } from '@/components/ui/scroll-area'
+    15→import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
+    16→import { useMemo, useState } from 'react'
+    17→import {
+    18→  Moon, Sun, Skull, ScrollText, Send, SkipForward, Check, X,
+    19→  Shield, Crosshair, Eye, FlaskConical, Target, Loader2, ChevronUp,
+    20→} from 'lucide-react'
+    21→import { motion, AnimatePresence } from 'framer-motion'
+    22→import { cn } from '@/lib/utils'
+    23→
+    24→const PHASE_INFO: Record<GamePhase, { label: string; icon: any; desc: string; isNight: boolean }> = {
+    25→  'role-reveal': { label: '身份确认', icon: Moon, desc: '请查看你的身份', isNight: false },
+    26→  'night-start': { label: '黑夜降临', icon: Moon, desc: '天黑请闭眼', isNight: true },
+    27→  'night-guard': { label: '守卫行动', icon: Shield, desc: '守卫请睁眼', isNight: true },
+    28→  'night-wolf': { label: '狼人行动', icon: Crosshair, desc: '狼人请睁眼', isNight: true },
+    29→  'night-seer': { label: '预言家行动', icon: Eye, desc: '预言家请睁眼', isNight: true },
+    30→  'night-witch': { label: '女巫行动', icon: FlaskConical, desc: '女巫请睁眼', isNight: true },
+    31→  'night-end': { label: '天亮结算', icon: Sun, desc: '正在结算...', isNight: true },
+    32→  'day-announce': { label: '公布死讯', icon: Sun, desc: '天亮了', isNight: false },
+    33→  'day-discuss': { label: '白天讨论', icon: ScrollText, desc: '依次发言', isNight: false },
+    34→  'day-vote': { label: '投票放逐', icon: Target, desc: '请投票', isNight: false },
+    35→  'day-result': { label: '投票结果', icon: Sun, desc: '公布结果', isNight: false },
+    36→  'hunter-shoot': { label: '猎人开枪', icon: Crosshair, desc: '猎人请开枪', isNight: false },
+    37→  'game-over': { label: '游戏结束', icon: Skull, desc: '', isNight: false },
+    38→}
+    39→
+    40→export function GameScreen() {
+    41→  const state = useWerewolfStore()
+    42→  const {
+    43→    players, userPlayerId, phase, day, log, nightAction,
+    44→    speeches, votes, currentSpeaker, processing, speaking, winner,
+    45→    witchAntidoteUsed, witchPoisonUsed, lastGuardTarget,
+    46→  } = state
+    47→
+    48→  const user = players.find((p) => p.id === userPlayerId)
+    49→  const [selectedTarget, setSelectedTarget] = useState<number | null>(null)
+    50→  const [witchSave, setWitchSave] = useState<boolean | null>(null)
+    51→  const [witchPoison, setWitchPoison] = useState<number | null>(null)
+    52→  const [speakText, setSpeakText] = useState('')
+    53→  const [showLog, setShowLog] = useState(false)
+    54→
+    55→  const phaseInfo = PHASE_INFO[phase]
+    56→  const isNight = phaseInfo.isNight
+    57→
+    58→  // 重置选择当阶段切换（渲染期间调整状态，React推荐模式）
+    59→  const [prevPhase, setPrevPhase] = useState<GamePhase>(phase)
+    60→  if (phase !== prevPhase) {
+    61→    setPrevPhase(phase)
+    62→    setSelectedTarget(null)
+    63→    setWitchSave(null)
+    64→    setWitchPoison(null)
+    65→    setSpeakText('')
+    66→  }
+    67→
+    68→  // 判断用户是否需要行动
+    69→  const userAction = useMemo(() => {
+    70→    if (!user || !user.isAlive) return null
+    71→    if (phase === 'night-guard' && user.role === 'guard') return 'guard'
+    72→    if (phase === 'night-wolf' && isWolf(user.role)) return 'wolf'
+    73→    if (phase === 'night-seer' && user.role === 'seer') return 'seer'
+    74→    if (phase === 'night-witch' && user.role === 'witch') return 'witch'
+    75→    if (phase === 'day-discuss' && currentSpeaker === user.id) return 'speak'
+    76→    if (phase === 'day-vote') return 'vote'
+    77→    if (phase === 'hunter-shoot' && state.hunterPending === user.id) return 'hunter'
+    78→    return null
+    79→  }, [phase, user, currentSpeaker, state.hunterPending])
+    80→
+    81→  // 可选择目标
+    82→  const selectableTargets = useMemo((): Player[] => {
+    83→    if (!user) return []
+    84→    const alive = players.filter((p) => p.isAlive)
+    85→    if (userAction === 'guard') {
+    86→      return alive.filter((p) => p.id !== lastGuardTarget)
+    87→    }
+    88→    if (userAction === 'wolf') {
+    89→      return alive.filter((p) => !isWolf(p.role))
+    90→    }
+    91→    if (userAction === 'seer') {
+    92→      return alive.filter((p) => p.id !== user.id)
+    93→    }
+    94→    if (userAction === 'witch') {
+    95→      // 毒杀目标
+    96→      return alive.filter((p) => p.id !== user.id)
+    97→    }
+    98→    if (userAction === 'vote') {
+    99→      return alive.filter((p) => p.id !== user.id)
+   100→    }
+   101→    if (userAction === 'hunter') {
+   102→      return alive
+   103→    }
+   104→    return []
+   105→  }, [userAction, players, user, lastGuardTarget])
+   106→
+   107→  const handleConfirm = () => {
+   108→    if (userAction === 'guard') {
+   109→      state.userNightAction({ guardTarget: selectedTarget ?? undefined })
+   110→    } else if (userAction === 'wolf') {
+   111→      state.userNightAction({ wolfTarget: selectedTarget ?? undefined })
+   112→    } else if (userAction === 'seer') {
+   113→      if (selectedTarget !== null) state.userNightAction({ seerTarget: selectedTarget })
+   114→    } else if (userAction === 'witch') {
+   115→      state.userNightAction({
+   116→        witchSave: witchSave === true,
+   117→        witchPoisonTarget: witchPoison ?? undefined,
+   118→      })
+   119→    } else if (userAction === 'vote') {
+   120→      state.userVote(selectedTarget)
+   121→    } else if (userAction === 'hunter') {
+   122→      state.userHunterShoot(selectedTarget)
+   123→    }
+   124→  }
+   125→
+   126→  const handleSpeak = () => {
+   127→    const text = speakText.trim()
+   128→    if (!text) return
+   129→    state.userSpeak(text)
+   130→    setSpeakText('')
+   131→  }
+   132→
+   133→  const canConfirm = useMemo(() => {
+   134→    if (userAction === 'guard' || userAction === 'wolf' || userAction === 'seer' || userAction === 'vote' || userAction === 'hunter') {
+   135→      return selectedTarget !== null
+   136→    }
+   137→    if (userAction === 'witch') {
+   138→      return witchSave !== null
+   139→    }
+   140→    return false
+   141→  }, [userAction, selectedTarget, witchSave])
+   142→
+   143→  if (!user) return null
+   144→
+   145→  // 用户被刀的目标（女巫视角）
+   146→  const witchWolfTarget = nightAction?.wolfTarget
+   147→  const witchCanSave = !witchAntidoteUsed
+   148→  const witchCanPoison = !witchPoisonUsed
+   149→
+   150→  // 当前发言玩家
+   151→  const speaker = currentSpeaker !== null ? players.find((p) => p.id === currentSpeaker) : null
+   152→
+   153→  return (
+   154→    <div className="relative min-h-screen flex flex-col overflow-hidden">
+   155→      {/* 预言家查验结果弹窗 */}
+   156→      <SeerResultDialog />
+   157→      {/* Toast 提示 */}
+   158→      <ToastTip />
+   159→      {/* 背景图 */}
+   160→      <div
+   161→        className={cn(
+   162→          'absolute inset-0 z-0 bg-cover bg-center transition-opacity duration-700',
+   163→          isNight ? 'opacity-50' : 'opacity-35',
+   164→        )}
+   165→        style={{ backgroundImage: `url(${isNight ? '/werewolf/night-bg.png' : '/werewolf/day-bg.png'})` }}
+   166→      />
+   167→      <div className={cn(
+   168→        'absolute inset-0 z-0 transition-colors duration-700',
+   169→        isNight ? 'bg-gradient-to-b from-violet-950/50 via-background/70 to-background' : 'bg-gradient-to-b from-amber-900/30 via-background/60 to-background'
+   170→      )} />
+   171→
+   172→      <div className="relative z-10 flex flex-col min-h-screen safe-top">
+   173→        {/* 顶部状态栏 */}
+   174→        <header className="px-4 pt-3 pb-2">
+   175→          <div className="flex items-center justify-between gap-2">
+   176→            <div className="flex items-center gap-2">
+   177→              <div className={cn(
+   178→                'w-10 h-10 rounded-xl flex items-center justify-center',
+   179→                isNight ? 'glass-card' : 'glass-card',
+   180→              )}>
+   181→                {isNight ? <Moon className="w-5 h-5 text-violet-300" /> : <Sun className="w-5 h-5 text-amber-300" />}
+   182→              </div>
+   183→              <div>
+   184→                <div className="flex items-center gap-1.5">
+   185→                  <span className="text-xs text-amber-100/50">第</span>
+   186→                  <span className="text-base font-bold text-amber-100">{day}</span>
+   187→                  <span className="text-xs text-amber-100/50">{isNight ? '夜' : '天'}</span>
+   188→                </div>
+   189→                <div className="text-xs text-amber-200/70">{phaseInfo.label}</div>
+   190→              </div>
+   191→            </div>
+   192→
+   193→            {/* 我的身份徽章 */}
+   194→            <div className={cn(
+   195→              'flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gradient-to-r',
+   196→              ROLES[user.role].color,
+   197→            )}>
+   198→              <span className="text-sm">{ROLES[user.role].emoji}</span>
+   199→              <span className="text-xs font-bold text-white/95">{ROLES[user.role].name}</span>
+   200→            </div>
+   201→
+   202→            {/* 日志按钮 */}
+   203→            <Sheet open={showLog} onOpenChange={setShowLog}>
+   204→              <SheetTrigger asChild>
+   205→                <Button variant="ghost" size="icon" className="rounded-full glass-card text-amber-100 hover:bg-amber-200/10">
+   206→                  <ScrollText className="w-5 h-5" />
+   207→                </Button>
+   208→              </SheetTrigger>
+   209→              <SheetContent side="right" className="w-[85%] sm:w-[400px] glass-card-strong border-amber-200/15 p-0">
+   210→                <SheetHeader className="px-4 py-3 border-b border-amber-200/10">
+   211→                  <SheetTitle className="flex items-center gap-2 text-amber-100">
+   212→                    <ScrollText className="w-4 h-4" />
+   213→                    游戏日志
+   214→                  </SheetTitle>
+   215→                </SheetHeader>
+   216→                <div className="h-[calc(100%-3.5rem)]">
+   217→                  <GameLog logs={log} />
+   218→                </div>
+   219→              </SheetContent>
+   220→            </Sheet>
+   221→          </div>
+   222→
+   223→          {/* 阶段描述条 */}
+   224→          <div className="mt-2 flex items-center justify-center gap-2 px-3 py-1.5 rounded-full glass-card">
+   225→            {processing && <Loader2 className="w-3 h-3 animate-spin text-amber-300" />}
+   226→            <span className="text-xs text-amber-100/80">{phaseInfo.desc}</span>
+   227→            {speaking && <span className="text-xs text-violet-300 animate-pulse">AI思考中...</span>}
+   228→          </div>
+   229→        </header>
+   230→
+   231→        {/* 玩家网格 */}
+   232→        <div className="flex-1 overflow-y-auto px-3 py-2 scrollbar-thin">
+   233→          <div className="grid grid-cols-4 gap-2">
+   234→            {players.map((p) => {
+   235→              const isUser = p.id === userPlayerId
+   236→              const isSelectable = selectableTargets.some((t) => t.id === p.id)
+   237→              const isSelected = selectedTarget === p.id
+   238→              const isWitchPoisonTarget = userAction === 'witch' && witchPoison === p.id
+   239→              const isCurrentSpeaker = phase === 'day-discuss' && currentSpeaker === p.id
+   240→              const isWolfTeammate = isWolf(user.role) && isWolf(p.role) && p.id !== user.id && p.isAlive
+   241→
+   242→              return (
+   243→                <PlayerAvatar
+   244→                  key={p.id}
+   245→                  player={p}
+   246→                  size="sm"
+   247→                  isUser={isUser}
+   248→                  selectable={isSelectable && !processing}
+   249→                  selected={isSelected || isWitchPoisonTarget}
+   250→                  showRole={isUser || isWolfTeammate || winner !== null}
+   251→                  badge={isCurrentSpeaker ? '发言中' : isWolfTeammate ? '同伴' : undefined}
+   252→                  badgeColor={isCurrentSpeaker ? 'bg-amber-400' : 'bg-red-500'}
+   253→                  highlightRing={isCurrentSpeaker ? 'gold' : isSelected ? 'gold' : isWitchPoisonTarget ? 'red' : null}
+   254→                  onClick={() => {
+   255→                    if (!isSelectable || processing) return
+   256→                    if (userAction === 'witch') {
+   257→                      setWitchPoison((cur) => (cur === p.id ? null : p.id))
+   258→                    } else {
+   259→                      setSelectedTarget((cur) => (cur === p.id ? null : p.id))
+   260→                    }
+   261→                  }}
+   262→                />
+   263→              )
+   264→            })}
+   265→          </div>
+   266→
+   267→          {/* 白天讨论区 */}
+   268→          {(phase === 'day-discuss' || phase === 'day-vote' || phase === 'day-result' || phase === 'day-announce') && (
+   269→            <div className="mt-3 glass-card rounded-2xl p-2 max-h-52 overflow-hidden">
+   270→              <div className="flex items-center justify-between px-1 pb-1.5">
+   271→                <span className="text-xs text-amber-200/70 flex items-center gap-1">
+   272→                  <ScrollText className="w-3 h-3" />
+   273→                  讨论记录
+   274→                </span>
+   275→                <span className="text-[10px] text-amber-100/40">{speeches.length}条发言</span>
+   276→              </div>
+   277→              <ScrollArea className="h-40 scrollbar-thin">
+   278→                <div className="space-y-1.5 px-1">
+   279→                  {speeches.length === 0 && phase === 'day-discuss' && (
+   280→                    <div className="text-center text-xs text-amber-100/40 py-4">
+   281→                      {speaker ? `${speaker.name}(${speaker.id}号) 即将发言...` : '等待发言...'}
+   282→                    </div>
+   283→                  )}
+   284→                  {speeches.map((s, i) => {
+   285→                    const sp = players.find((p) => p.id === s.playerId)
+   286→                    return (
+   287→                      <motion.div
+   288→                        key={i}
+   289→                        initial={{ opacity: 0, y: 8 }}
+   290→                        animate={{ opacity: 1, y: 0 }}
+   291→                        className={cn(
+   292→                          'flex gap-2 items-start text-xs',
+   293→                          s.isUser && 'flex-row-reverse',
+   294→                        )}
+   295→                      >
+   296→                        <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-slate-600/60 to-slate-800/60 flex items-center justify-center text-base shrink-0">
+   297→                          {sp?.avatar || '🙂'}
+   298→                        </div>
+   299→                        <div className={cn(
+   300→                          'flex-1 rounded-xl px-2.5 py-1.5',
+   301→                          s.isUser ? 'bg-amber-400/15 text-amber-100' : 'glass-card text-amber-100/85',
+   302→                        )}>
+   303→                          <div className="text-[10px] text-amber-200/60 mb-0.5">
+   304→                            {s.playerName} · {s.playerId}号
+   305→                          </div>
+   306→                          <div className="leading-relaxed">{s.content}</div>
+   307→                        </div>
+   308→                      </motion.div>
+   309→                    )
+   310→                  })}
+   311→                </div>
+   312→              </ScrollArea>
+   313→            </div>
+   314→          )}
+   315→
+   316→          {/* 投票记录展示 */}
+   317→          {phase === 'day-vote' && votes.length > 0 && (
+   318→            <div className="mt-2 glass-card rounded-2xl p-2">
+   319→              <div className="text-xs text-amber-200/70 px-1 pb-1.5 flex items-center gap-1">
+   320→                <Target className="w-3 h-3" /> 已投票 ({votes.length}/{players.filter((p) => p.isAlive).length})
+   321→              </div>
+   322→              <div className="flex flex-wrap gap-1">
+   323→                {votes.map((v, i) => (
+   324→                  <Badge key={i} variant="secondary" className="text-[10px] glass-card">
+   325→                    {v.voterName}→{v.targetName || '弃票'}
+   326→                  </Badge>
+   327→                ))}
+   328→              </div>
+   329→            </div>
+   330→          )}
+   331→        </div>
+   332→
+   333→        {/* 底部操作栏 */}
+   334→        <footer className="px-3 pt-2 pb-3 border-t border-amber-200/10 glass-card-strong safe-bottom">
+   335→          <AnimatePresence mode="wait">
+   336→            {userAction === null && (
+   337→              <motion.div
+   338→                key="waiting"
+   339→                initial={{ opacity: 0 }}
+   340→                animate={{ opacity: 1 }}
+   341→                exit={{ opacity: 0 }}
+   342→                className="flex items-center justify-center py-3"
+   343→              >
+   344→                <div className="flex items-center gap-2 text-sm text-amber-100/60">
+   345→                  {processing ? (
+   346→                    <>
+   347→                      <Loader2 className="w-4 h-4 animate-spin text-amber-300" />
+   348→                      <span>正在处理...</span>
+   349→                    </>
+   350→                  ) : phase === 'day-discuss' && speaker ? (
+   351→                    <>
+   352→                      <span className="text-lg">{speaker.avatar}</span>
+   353→                      <span>{speaker.name}({speaker.id}号) 正在发言...</span>
+   354→                    </>
+   355→                  ) : (
+   356→                    <span>等待其他玩家行动...</span>
+   357→                  )}
+   358→                </div>
+   359→              </motion.div>
+   360→            )}
+   361→
+   362→            {/* 夜晚行动 */}
+   363→            {(userAction === 'guard' || userAction === 'wolf' || userAction === 'seer') && (
+   364→              <motion.div
+   365→                key={userAction}
+   366→                initial={{ opacity: 0, y: 10 }}
+   367→                animate={{ opacity: 1, y: 0 }}
+   368→                exit={{ opacity: 0, y: 10 }}
+   369→                className="space-y-2"
+   370→              >
+   371→                <div className="flex items-center justify-between">
+   372→                  <div className="flex items-center gap-2">
+   373→                    <div className={cn('w-8 h-8 rounded-lg bg-gradient-to-br flex items-center justify-center', ROLES[user.role].color)}>
+   374→                      {userAction === 'guard' && <Shield className="w-4 h-4 text-white" />}
+   375→                      {userAction === 'wolf' && <Crosshair className="w-4 h-4 text-white" />}
+   376→                      {userAction === 'seer' && <Eye className="w-4 h-4 text-white" />}
+   377→                    </div>
+   378→                    <div>
+   379→                      <div className="text-sm font-bold text-amber-100">{ROLES[user.role].actionPrompt}</div>
+   380→                      <div className="text-[10px] text-amber-100/50">
+   381→                        {userAction === 'guard' && lastGuardTarget !== null && `不可选${lastGuardTarget}号(连守限制)`}
+   382→                        {userAction === 'wolf' && '选择今晚要击杀的目标'}
+   383→                        {userAction === 'seer' && '选择要查验身份的玩家'}
+   384→                      </div>
+   385→                    </div>
+   386→                  </div>
+   387→                  {selectedTarget !== null && (
+   388→                    <Badge className="bg-amber-400 text-amber-950">
+   389→                      已选 {selectedTarget}号
+   390→                    </Badge>
+   391→                  )}
+   392→                </div>
+   393→                <Button
+   394→                  onClick={handleConfirm}
+   395→                  disabled={!canConfirm || processing}
+   396→                  size="lg"
+   397→                  className="w-full h-12 rounded-xl bg-gradient-to-r from-amber-400 to-orange-500 text-amber-950 font-bold disabled:opacity-40 active:scale-95 transition-all"
+   398→                >
+   399→                  <Check className="w-4 h-4 mr-1" />
+   400→                  确认
+   401→                </Button>
+   402→              </motion.div>
+   403→            )}
+   404→
+   405→            {/* 女巫行动 */}
+   406→            {userAction === 'witch' && (
+   407→              <motion.div
+   408→                key="witch"
+   409→                initial={{ opacity: 0, y: 10 }}
+   410→                animate={{ opacity: 1, y: 0 }}
+   411→                exit={{ opacity: 0, y: 10 }}
+   412→                className="space-y-2"
+   413→              >
+   414→                <div className="flex items-center gap-2">
+   415→                  <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-700 flex items-center justify-center">
+   416→                    <FlaskConical className="w-4 h-4 text-white" />
+   417→                  </div>
+   418→                  <div className="flex-1">
+   419→                    <div className="text-sm font-bold text-amber-100">女巫行动</div>
+   420→                    <div className="text-[10px] text-amber-100/50">
+   421→                      {witchWolfTarget !== undefined ? `今晚${witchWolfTarget}号被刀` : '今晚平安'}
+   422→                    </div>
+   423→                  </div>
+   424→                </div>
+   425→
+   426→                {/* 解药 */}
+   427→                {witchCanSave && witchWolfTarget !== undefined && witchSave === null && (
+   428→                  <div className="glass-card rounded-xl p-2.5">
+   429→                    <div className="text-xs text-amber-100/80 mb-2">是否使用解药救活 {witchWolfTarget}号？</div>
+   430→                    <div className="flex gap-2">
+   431→                      <Button
+   432→                        size="sm"
+   433→                        onClick={() => setWitchSave(true)}
+   434→                        className="flex-1 h-9 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-white"
+   435→                      >
+   436→                        <Check className="w-3.5 h-3.5 mr-1" />使用解药
+   437→                      </Button>
+   438→                      <Button
+   439→                        size="sm"
+   440→                        variant="outline"
+   441→                        onClick={() => setWitchSave(false)}
+   442→                        className="flex-1 h-9 rounded-lg glass-card"
+   443→                      >
+   444→                        <X className="w-3.5 h-3.5 mr-1" />不救
+   445→                      </Button>
+   446→                    </div>
+   447→                  </div>
+   448→                )}
+   449→
+   450→                {/* 毒药选择 */}
+   451→                {witchCanPoison && witchSave !== null && (
+   452→                  <div className="glass-card rounded-xl p-2.5">
+   453→                    <div className="text-xs text-amber-100/80 mb-1.5">
+   454→                      {witchPoison !== null ? `将毒杀 ${witchPoison}号` : '是否使用毒药？选择目标或跳过'}
+   455→                    </div>
+   456→                    {witchPoison !== null && (
+   457→                      <Button
+   458→                        size="sm"
+   459→                        variant="ghost"
+   460→                        onClick={() => setWitchPoison(null)}
+   461→                        className="h-7 text-xs text-amber-200/70 px-2"
+   462→                      >
+   463→                        取消毒药选择
+   464→                      </Button>
+   465→                    )}
+   466→                  </div>
+   467→                )}
+   468→
+   469→                <Button
+   470→                  onClick={handleConfirm}
+   471→                  disabled={witchSave === null || processing}
+   472→                  size="lg"
+   473→                  className="w-full h-12 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-bold disabled:opacity-40 active:scale-95 transition-all"
+   474→                >
+   475→                  <Check className="w-4 h-4 mr-1" />
+   476→                  确认行动
+   477→                </Button>
+   478→              </motion.div>
+   479→            )}
+   480→
+   481→            {/* 白天发言 */}
+   482→            {userAction === 'speak' && (
+   483→              <motion.div
+   484→                key="speak"
+   485→                initial={{ opacity: 0, y: 10 }}
+   486→                animate={{ opacity: 1, y: 0 }}
+   487→                exit={{ opacity: 0, y: 10 }}
+   488→                className="space-y-2"
+   489→              >
+   490→                <div className="flex items-center gap-2">
+   491→                  <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center">
+   492→                    <span className="text-base">🗣️</span>
+   493→                  </div>
+   494→                  <div className="text-sm font-bold text-amber-100">轮到你发言了</div>
+   495→                </div>
+   496→                <div className="flex gap-2 items-end">
+   497→                  <VoiceInput
+   498→                    onTranscript={(t) => setSpeakText((cur) => (cur ? cur + ' ' : '') + t)}
+   499→                    disabled={processing}
+   500→                  />
+   501→                  <Textarea
+   502→                    value={speakText}
+   503→                    onChange={(e) => setSpeakText(e.target.value)}
+   504→                    placeholder="输入你的发言，或点击麦克风语音..."
+   505→                    className="flex-1 min-h-[44px] max-h-24 resize-none glass-card border-amber-300/20 text-amber-100 placeholder:text-amber-100/40"
+   506→                    rows={1}
+   507→                    onKeyDown={(e) => {
+   508→                      if (e.key === 'Enter' && !e.shiftKey) {
+   509→                        e.preventDefault()
+   510→                        handleSpeak()
+   511→                      }
+   512→                    }}
+   513→                  />
+   514→                  <Button
+   515→                    onClick={handleSpeak}
+   516→                    disabled={!speakText.trim() || processing}
+   517→                    size="icon"
+   518→                    className="h-11 w-11 rounded-full bg-gradient-to-r from-amber-400 to-orange-500 text-amber-950 disabled:opacity-40"
+   519→                  >
+   520→                    <Send className="w-4 h-4" />
+   521→                  </Button>
+   522→                </div>
+   523→                <Button
+   524→                  onClick={() => state.skipSpeak()}
+   525→                  variant="ghost"
+   526→                  size="sm"
+   527→                  disabled={processing}
+   528→                  className="w-full h-8 text-xs text-amber-100/50"
+   529→                >
+   530→                  <SkipForward className="w-3 h-3 mr-1" />
+   531→                  跳过发言
+   532→                </Button>
+   533→              </motion.div>
+   534→            )}
+   535→
+   536→            {/* 投票 */}
+   537→            {userAction === 'vote' && (
+   538→              <motion.div
+   539→                key="vote"
+   540→                initial={{ opacity: 0, y: 10 }}
+   541→                animate={{ opacity: 1, y: 0 }}
+   542→                exit={{ opacity: 0, y: 10 }}
+   543→                className="space-y-2"
+   544→              >
+   545→                <div className="flex items-center justify-between">
+   546→                  <div className="flex items-center gap-2">
+   547→                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-rose-500 to-red-700 flex items-center justify-center">
+   548→                      <Target className="w-4 h-4 text-white" />
+   549→                    </div>
+   550→                    <div>
+   551→                      <div className="text-sm font-bold text-amber-100">请投票放逐</div>
+   552→                      <div className="text-[10px] text-amber-100/50">
+   553→                        {selectedTarget !== null ? `投票给 ${selectedTarget}号` : '选择你认为是狼人的玩家'}
+   554→                      </div>
+   555→                    </div>
+   556→                  </div>
+   557→                </div>
+   558→                <div className="flex gap-2">
+   559→                  <Button
+   560→                    onClick={() => state.userVote(null)}
+   561→                    variant="outline"
+   562→                    disabled={processing}
+   563→                    className="flex-1 h-11 rounded-xl glass-card"
+   564→                  >
+   565→                    <X className="w-4 h-4 mr-1" />弃票
+   566→                  </Button>
+   567→                  <Button
+   568→                    onClick={handleConfirm}
+   569→                    disabled={!canConfirm || processing}
+   570→                    className="flex-1 h-11 rounded-xl bg-gradient-to-r from-rose-500 to-red-600 text-white font-bold disabled:opacity-40"
+   571→                  >
+   572→                    <Check className="w-4 h-4 mr-1" />
+   573→                    确认投票
+   574→                  </Button>
+   575→                </div>
+   576→              </motion.div>
+   577→            )}
+   578→
+   579→            {/* 猎人开枪 */}
+   580→            {userAction === 'hunter' && (
+   581→              <motion.div
+   582→                key="hunter"
+   583→                initial={{ opacity: 0, y: 10 }}
+   584→                animate={{ opacity: 1, y: 0 }}
+   585→                exit={{ opacity: 0, y: 10 }}
+   586→                className="space-y-2"
+   587→              >
+   588→                <div className="flex items-center gap-2">
+   589→                  <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 to-orange-700 flex items-center justify-center">
+   590→                    <Crosshair className="w-4 h-4 text-white" />
+   591→                  </div>
+   592→                  <div>
+   593→                    <div className="text-sm font-bold text-amber-100">🏹 猎人开枪</div>
+   594→                    <div className="text-[10px] text-amber-100/50">
+   595→                      {selectedTarget !== null ? `将带走 ${selectedTarget}号` : '选择目标或不开枪'}
+   596→                    </div>
+   597→                  </div>
+   598→                </div>
+   599→                <div className="flex gap-2">
+   600→                  <Button
+   601→                    onClick={() => state.userHunterShoot(null)}
+   602→                    variant="outline"
+   603→                    disabled={processing}
+   604→                    className="flex-1 h-11 rounded-xl glass-card"
+   605→                  >
+   606→                    不开枪
+   607→                  </Button>
+   608→                  <Button
+   609→                    onClick={handleConfirm}
+   610→                    disabled={!canConfirm || processing}
+   611→                    className="flex-1 h-11 rounded-xl bg-gradient-to-r from-amber-500 to-orange-700 text-white font-bold disabled:opacity-40"
+   612→                  >
+   613→                    <Crosshair className="w-4 h-4 mr-1" />
+   614→                    开枪
+   615→                  </Button>
+   616→                </div>
+   617→              </motion.div>
+   618→            )}
+   619→          </AnimatePresence>
+   620→        </footer>
+   621→      </div>
+   622→    </div>
+   623→  )
+   624→}
+   625→
