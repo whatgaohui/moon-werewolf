@@ -113,9 +113,11 @@ const initialState: WerewolfGameState = {
   sheriffTransferPending: null,
   lastWordsPending: [],
   _aiSheriffDecided: false,
+  _aiSheriffCollected: false,
   whiteWolfSelfDestructPending: null,
   seerResultPending: null,
   toast: null,
+  voteDeadline: null,
 }
 
 // ============ AI 视角隔离的请求构建 (v2.0 §1.1.2) ============
@@ -321,6 +323,34 @@ let get: () => WerewolfGameState & WerewolfStore
 let set: (
   partial: Partial<WerewolfGameState> | ((s: WerewolfGameState) => Partial<WerewolfGameState>),
 ) => void
+
+// 投票超时计时器（30秒未投票自动弃票）
+let voteTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearVoteTimer() {
+  if (voteTimer !== null) {
+    clearTimeout(voteTimer)
+    voteTimer = null
+  }
+}
+
+// 启动投票超时计时器：30秒后用户未投票则自动弃票
+function startVoteTimer() {
+  clearVoteTimer()
+  voteTimer = setTimeout(() => {
+    voteTimer = null
+    const s = get()
+    if (
+      (s.phase === 'day-vote' || s.phase === 'day-sheriff-vote') &&
+      s.voteDeadline !== null &&
+      Date.now() >= s.voteDeadline
+    ) {
+      // 用户未投票 → 自动弃票
+      s.showToast('⏰ 投票超时，自动弃票', 'danger')
+      s.userVote(null)
+    }
+  }, 31000)
+}
 
 export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
   get = _get as any
@@ -794,6 +824,7 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
             sheriffCampaignIdx: 0,
             speeches: [],
             _aiSheriffDecided: false,
+            _aiSheriffCollected: false,
             processing: false,
           })
           await delay(800)
@@ -815,11 +846,12 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
           }
 
           // 收集所有 AI 玩家的上警决定
-          if (!get()._aiSheriffDecided) {
-            set({ _aiSheriffDecided: true })
-            // AI 上警概率（v2.0 §8 + §9.3）：预言家90%，狼人60%，女巫40%，猎人30%，守卫20%，平民20%
+          if (!get()._aiSheriffCollected) {
+            set({ _aiSheriffCollected: true })
+            // AI 上警概率（v2.0 §8 + §9.3）：预言家95%，狼人60%，女巫40%，猎人30%，守卫20%，平民20%
+            // 预言家几乎必上警(1.5票权+警徽流)是标准狼人杀策略
             const probMap: Record<string, number> = {
-              seer: 0.9, wolf: 0.6, 'white-wolf': 0.6,
+              seer: 0.95, wolf: 0.6, 'white-wolf': 0.6,
               witch: 0.4, hunter: 0.3, guard: 0.2, villager: 0.2,
             }
             for (const p of alive) {
@@ -830,6 +862,20 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
                 get().addLog({
                   type: 'day', day, phase: 'day-sheriff-campaign',
                   content: `${p.id}号(${p.name})上警！`,
+                })
+              }
+            }
+            // 保底机制: 若无AI上警且用户未上警, 强制至少1人上警(优先预言家, 其次随机AI)
+            // 避免6人局出现0人上警的极端情况破坏游戏流程
+            const aiCandidates = candidates.filter((id) => id !== userId)
+            if (aiCandidates.length === 0 && !candidates.includes(userId)) {
+              const seer = alive.find((p) => !p.isUser && p.role === 'seer')
+              const forced = seer || alive.find((p) => !p.isUser)
+              if (forced) {
+                candidates.push(forced.id)
+                get().addLog({
+                  type: 'day', day, phase: 'day-sheriff-campaign',
+                  content: `${forced.id}号(${forced.name})上警！`,
                 })
               }
             }
@@ -901,7 +947,8 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
             type: 'day', day, phase: 'day-sheriff-campaign',
             content: `🗳️ 候选人发言完毕，未上警的玩家开始投票选出警长。`,
           })
-          set({ phase: 'day-sheriff-vote', sheriffVotes: [], processing: false })
+          set({ phase: 'day-sheriff-vote', sheriffVotes: [], processing: false, voteDeadline: Date.now() + 30000 })
+          startVoteTimer()
           await delay(500)
           get().proceedDayPhase()
           return
@@ -1090,7 +1137,8 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
           const speakCount = get().speakCount
 
           if (currentId === null || speakCount >= alive.length) {
-            set({ phase: 'day-vote', currentSpeaker: null, votes: [], processing: false })
+            set({ phase: 'day-vote', currentSpeaker: null, votes: [], processing: false, voteDeadline: Date.now() + 30000 })
+            startVoteTimer()
             await delay(500)
             get().proceedDayPhase()
             return
@@ -1353,12 +1401,14 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
 
     userVote: async (targetId) => {
       const state = get()
+      // 用户已投票：清除超时计时器与截止时间
+      clearVoteTimer()
       if (state.phase === 'day-sheriff-vote') {
         const voter = state.players.find((p) => p.id === state.userPlayerId)
         if (!voter) return
         const target = targetId !== null ? state.players.find((p) => p.id === targetId) : null
         const vote: VoteRecord = { voterId: voter.id, voterName: voter.name, targetId, targetName: target ? target.name : null }
-        set((s) => ({ sheriffVotes: [...s.sheriffVotes, vote] }))
+        set((s) => ({ sheriffVotes: [...s.sheriffVotes, vote], voteDeadline: null }))
         get().addLog({
           type: 'vote', day: state.day, phase: 'day-sheriff-vote',
           playerId: voter.id, playerName: voter.name,
@@ -1372,7 +1422,7 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
       if (!voter) return
       const target = targetId !== null ? state.players.find((p) => p.id === targetId) : null
       const vote: VoteRecord = { voterId: voter.id, voterName: voter.name, targetId, targetName: target ? target.name : null }
-      set((s) => ({ votes: [...s.votes, vote] }))
+      set((s) => ({ votes: [...s.votes, vote], voteDeadline: null }))
       get().addLog({
         type: 'vote', day: state.day, phase: 'day-vote',
         playerId: voter.id, playerName: voter.name,
@@ -1398,7 +1448,7 @@ export const useWerewolfStore = create<WerewolfStore>((_set, _get) => {
           content: `${state.userPlayerId}号(你)不上警。`,
         })
       }
-      // 标记用户已决定，让 proceedDayPhase 进入收集 AI 上警决定的分支
+      // 标记用户已决定上警/不上警；AI上警决定由 proceedDayPhase 中 _aiSheriffCollected 标记控制
       set({ processing: false, _aiSheriffDecided: true })
       get().proceedDayPhase()
     },

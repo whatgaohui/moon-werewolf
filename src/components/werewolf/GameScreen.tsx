@@ -13,7 +13,7 @@ import { Badge } from '@/components/ui/badge'
 import { Textarea } from '@/components/ui/textarea'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
-import { useMemo, useState } from 'react'
+import { useMemo, useState, useEffect, useRef } from 'react'
 import {
   Moon, Sun, Skull, ScrollText, Send, SkipForward, Check, X,
   Shield, Crosshair, Eye, FlaskConical, Target, Loader2, ChevronUp, Bomb, Crown,
@@ -43,12 +43,38 @@ const PHASE_INFO: Record<GamePhase, { label: string; icon: any; desc: string; is
   'game-over': { label: '游戏结束', icon: Skull, desc: '', isNight: false },
 }
 
+// 投票倒计时组件：根据 voteDeadline 显示剩余秒数
+function VoteCountdown({ deadline }: { deadline: number | null }) {
+  const [tick, setTick] = useState<number>(0)
+  useEffect(() => {
+    if (deadline === null) return
+    const timer = setInterval(() => setTick((t) => t + 1), 500)
+    return () => clearInterval(timer)
+  }, [deadline])
+  // 引用 tick 触发重新渲染（值不直接使用）
+  void tick
+  if (deadline === null) return null
+  const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000))
+  if (remaining <= 0) return null
+  const urgent = remaining <= 10
+  return (
+    <div
+      className={cn(
+        'flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-bold tabular-nums',
+        urgent ? 'bg-red-500/30 text-red-200 animate-pulse' : 'bg-amber-500/20 text-amber-200',
+      )}
+    >
+      ⏰ {remaining}s
+    </div>
+  )
+}
+
 export function GameScreen() {
   const state = useWerewolfStore()
   const {
     players, userPlayerId, phase, day, log, nightAction,
     speeches, votes, currentSpeaker, processing, speaking, winner,
-    witchAntidoteUsed, witchPoisonUsed, lastGuardTarget,
+    witchAntidoteUsed, witchPoisonUsed, lastGuardTarget, voteDeadline,
   } = state
 
   const user = players.find((p) => p.id === userPlayerId)
@@ -58,6 +84,12 @@ export function GameScreen() {
   const [speakText, setSpeakText] = useState('')
   const [showLog, setShowLog] = useState(false)
   const [selfDestructMode, setSelfDestructMode] = useState(false)
+
+  // 讨论区自动滚到底部 (确保看到最新发言)
+  const speechEndRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    speechEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [speeches.length])
 
   const phaseInfo = PHASE_INFO[phase]
   const isNight = phaseInfo.isNight
@@ -413,7 +445,7 @@ export function GameScreen() {
 
           {/* 白天讨论区（含警长竞选、遗言） */}
           {(phase === 'day-discuss' || phase === 'day-vote' || phase === 'day-result' || phase === 'day-announce' || phase === 'day-sheriff-campaign' || phase === 'day-sheriff-vote' || phase === 'day-lastwords' || phase === 'day-sheriff-announce') && speeches.length > 0 && (
-            <div className="mt-3 glass-card rounded-2xl p-2 max-h-52 overflow-hidden">
+            <div className="mt-3 glass-card rounded-2xl p-2 max-h-72 overflow-hidden">
               <div className="flex items-center justify-between px-1 pb-1.5">
                 <span className="text-xs text-amber-200/70 flex items-center gap-1">
                   <ScrollText className="w-3 h-3" />
@@ -421,7 +453,7 @@ export function GameScreen() {
                 </span>
                 <span className="text-[10px] text-amber-100/40">{speeches.length}条</span>
               </div>
-              <ScrollArea className="h-40 scrollbar-thin">
+              <ScrollArea className="h-56 scrollbar-thin">
                 <div className="space-y-1.5 px-1">
                   {speeches.map((s, i) => {
                     const sp = players.find((p) => p.id === s.playerId)
@@ -450,6 +482,7 @@ export function GameScreen() {
                       </motion.div>
                     )
                   })}
+                  <div ref={speechEndRef} />
                 </div>
               </ScrollArea>
             </div>
@@ -631,6 +664,7 @@ export function GameScreen() {
                       </div>
                     </div>
                   </div>
+                  <VoteCountdown deadline={voteDeadline} />
                 </div>
                 <div className="flex gap-2">
                   <Button
@@ -1020,6 +1054,7 @@ export function GameScreen() {
                       </div>
                     </div>
                   </div>
+                  <VoteCountdown deadline={voteDeadline} />
                 </div>
                 <div className="flex gap-2">
                   <Button

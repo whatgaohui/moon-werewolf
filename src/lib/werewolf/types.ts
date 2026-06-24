@@ -176,10 +176,13 @@ export interface WerewolfGameState {
   sheriffCampaignIdx: number         // 警长竞选发言进度
   sheriffTransferPending: number | null // 待移交警徽的死亡警长id
   lastWordsPending: number[]         // 待发表遗言的玩家id队列
-  _aiSheriffDecided: boolean         // AI上警决定已收集
+  _aiSheriffDecided: boolean         // 用户上警决定已收集
+  _aiSheriffCollected: boolean       // AI上警决定已收集
   // 白狼王自爆相关
   whiteWolfSelfDestructPending: number | null // 待自爆的白狼王id
   // 弹窗/提示状态
   seerResultPending: { targetId: number; targetName: string; result: 'wolf' | 'good' } | null
   toast: { id: string; content: string; type: 'info' | 'success' | 'danger' } | null
+  // 投票超时
+  voteDeadline: number | null        // 投票截止时间戳（用户30秒未投票自动弃票）
 }
