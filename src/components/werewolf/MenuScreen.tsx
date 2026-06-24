@@ -38,7 +38,7 @@ export function MenuScreen() {
         </div>
 
         {/* 标题 */}
-        <div className="flex flex-col items-center text-center animate-fade-in-up" style={{ animationDelay: '0.15s', opacity: 0 }}>
+        <div className="flex flex-col items-center text-center animate-fade-in-up" style={{ animationDelay: '0.15s' }}>
           <div className="text-6xl mb-3 animate-float-slow">🐺</div>
           <h1 className="text-5xl font-black tracking-tight text-glow-strong bg-gradient-to-b from-amber-100 via-amber-200 to-amber-400 bg-clip-text text-transparent">
             月夜狼人杀
@@ -53,7 +53,7 @@ export function MenuScreen() {
         </div>
 
         {/* 中间角色预览 */}
-        <div className="flex flex-col items-center gap-4 animate-fade-in-up" style={{ animationDelay: '0.3s', opacity: 0 }}>
+        <div className="flex flex-col items-center gap-4 animate-fade-in-up" style={{ animationDelay: '0.3s' }}>
           <div className="flex gap-3 text-4xl">
             {(['seer', 'witch', 'hunter', 'guard'] as const).map((r, i) => (
               <div
@@ -69,7 +69,7 @@ export function MenuScreen() {
         </div>
 
         {/* 按钮区 */}
-        <div className="w-full max-w-sm flex flex-col gap-3 animate-fade-in-up" style={{ animationDelay: '0.45s', opacity: 0 }}>
+        <div className="w-full max-w-sm flex flex-col gap-3 animate-fade-in-up" style={{ animationDelay: '0.45s' }}>
           <Button
             onClick={goToSetup}
             size="lg"

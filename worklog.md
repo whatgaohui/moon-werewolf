@@ -398,3 +398,36 @@ Stage Summary:
 - 完整游戏流程端到端验证通过(菜单→设置→角色揭晓→夜晚→白天)
 - AI玩家决策与发言功能正常(z-ai-web-dev-sdk 调用成功)
 - 项目可在 Preview Panel 中正常游玩
+
+---
+Task ID: 18 (修复Preview Panel按钮不显示)
+Agent: 主代理 (Z.ai Code)
+Task: 修复用户反馈"没有按钮、不能正常玩"问题
+
+Work Log:
+- 【问题定位】用户提供截图，VLM分析显示：仅显示 menu-bg.png 背景图(月亮/星星/狼剪影)，
+  但"月夜狼人杀"标题和"开始游戏"等按钮完全不可见。
+- 【根因分析】dev.log 中有关键警告:
+  "Cross origin request detected from preview-chat-*.space-z.ai to /_next/* resource"
+  用户通过 Preview Panel (域名 preview-chat-*.space-z.ai) 访问时，Next.js 拦截
+  /_next/* 跨域请求(CSS/JS bundles)，导致 globals.css 不加载。
+  MenuScreen 的按钮容器使用 inline style opacity:0 + CSS class animate-fade-in-up，
+  CSS 不加载时动画不执行，元素永久停留在 opacity:0 不可见状态。
+- 【修复1】next.config.ts 添加 allowedDevOrigins: ["*.space-z.ai"]
+  允许 Preview Panel 域名跨域访问 /_next/* 资源，从根本上解决 CSS/JS 不加载问题
+- 【修复2】增强 MenuScreen 鲁棒性:
+  - globals.css: .animate-fade-in-up 的 fill-mode 从 forwards 改为 both
+    (delay 期间应用 from 状态 opacity:0，动画后保持 to 状态 opacity:1)
+  - MenuScreen.tsx: 移除3处 inline style opacity:0
+    现在: CSS 加载时执行淡入动画; CSS 不加载时元素默认可见(opacity:1)
+    彻底消除"CSS 失败导致内容永久不可见"的脆弱依赖
+- 【验证】agent-browser + VLM 双重确认:
+  ✓ 菜单页: VLM确认"能看到月夜狼人杀标题""能看到开始游戏按钮""完整显示UI元素"
+  ✓ 设置页: 4种套餐配置 + 身份偏好全部正常显示
+  ✓ 0 控制台错误
+  ✓ lint 通过
+
+Stage Summary:
+- Preview Panel 跨域 CSS 阻塞问题已修复(allowedDevOrigins)
+- MenuScreen 不再依赖 CSS 才能可见，鲁棒性大幅提升
+- 用户需在 Preview Panel 中硬刷新(Ctrl+Shift+R)以加载新配置
